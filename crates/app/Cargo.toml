@@ -1,0 +1,13 @@
+[package]
+name = "app"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+bookshelf_application = { package = "application", path = "../application" }
+bookshelf_core = { package = "bookshelf-core", path = "../core" }
+bookshelf_engine = { package = "engine", path = "../engine" }
+bookshelf_storage = { package = "storage", path = "../storage" }
+bookshelf_ui = { package = "ui", path = "../ui" }
+anyhow.workspace = true
+directories.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "engine"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+bookshelf_core = { package = "bookshelf-core", path = "../core" }
+anyhow.workspace = true
+pdf.workspace = true

@@ -1,0 +1,7 @@
+[package]
+name = "application"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+bookshelf_core = { package = "bookshelf-core", path = "../core" }

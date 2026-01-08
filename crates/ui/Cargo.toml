@@ -1,0 +1,12 @@
+[package]
+name = "ui"
+edition = "2024"
+version.workspace = true
+
+[dependencies]
+bookshelf_application = { package = "application", path = "../application" }
+bookshelf_core = { package = "bookshelf-core", path = "../core" }
+bookshelf_engine = { package = "engine", path = "../engine" }
+anyhow.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
