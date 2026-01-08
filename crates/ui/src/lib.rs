@@ -7,15 +7,18 @@ use anyhow::Context as _;
 use bookshelf_application::AppContext;
 use bookshelf_core::Settings;
 use bookshelf_engine::Engine;
-use crossterm::event::{Event, KeyCode, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{event, terminal};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::Terminal;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiExit {
@@ -73,20 +76,20 @@ impl Ui {
                     }
 
                     if self.scan_panel.open {
-                        if let Some(exit) = self.handle_scan_panel_key(key.code)? {
+                        if let Some(exit) = self.handle_scan_panel_key(key)? {
                             return Ok(UiOutcome {
                                 ctx: self.ctx.clone(),
                                 exit,
                             });
                         }
                     } else if self.preview_panel.open {
-                        if let Some(exit) = self.handle_preview_panel_key(key.code)? {
+                        if let Some(exit) = self.handle_preview_panel_key(key)? {
                             return Ok(UiOutcome {
                                 ctx: self.ctx.clone(),
                                 exit,
                             });
                         }
-                    } else if let Some(exit) = self.handle_main_key(key.code)? {
+                    } else if let Some(exit) = self.handle_main_key(key)? {
                         return Ok(UiOutcome {
                             ctx: self.ctx.clone(),
                             exit,
@@ -97,9 +100,9 @@ impl Ui {
         }
     }
 
-    fn handle_main_key(&mut self, code: KeyCode) -> anyhow::Result<Option<UiExit>> {
-        match code {
-            KeyCode::Char('q') => Ok(Some(UiExit::Quit)),
+    fn handle_main_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        match key.code {
+            KeyCode::Esc => Ok(Some(UiExit::Quit)),
             KeyCode::Char('o') => {
                 self.scan_panel.open = true;
                 self.scan_panel.input = join_roots(&self.ctx.settings);
@@ -111,21 +114,13 @@ impl Ui {
                 self.preview_panel.draft = self.ctx.settings.clone();
                 Ok(None)
             }
-            KeyCode::Char('m') => {
-                self.ctx.settings.cycle_preview_mode();
-                Ok(None)
-            }
-            KeyCode::Char('s') => {
-                self.ctx.settings.cycle_scan_scope();
-                Ok(None)
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 if !self.ctx.books.is_empty() {
                     self.ctx.selected = (self.ctx.selected + 1).min(self.ctx.books.len() - 1);
                 }
                 Ok(None)
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 self.ctx.selected = self.ctx.selected.saturating_sub(1);
                 Ok(None)
             }
@@ -133,8 +128,8 @@ impl Ui {
         }
     }
 
-    fn handle_preview_panel_key(&mut self, code: KeyCode) -> anyhow::Result<Option<UiExit>> {
-        match code {
+    fn handle_preview_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        match key.code {
             KeyCode::Esc => {
                 self.preview_panel.open = false;
                 Ok(None)
@@ -145,13 +140,8 @@ impl Ui {
                 self.preview_panel.open = false;
                 Ok(None)
             }
-            KeyCode::Char('q') => Ok(Some(UiExit::Quit)),
             KeyCode::Char('m') | KeyCode::Tab => {
                 self.preview_panel.draft.cycle_preview_mode();
-                Ok(None)
-            }
-            KeyCode::Char('s') => {
-                self.preview_panel.draft.cycle_scan_scope();
                 Ok(None)
             }
             KeyCode::Char('+') | KeyCode::Up => {
@@ -170,14 +160,28 @@ impl Ui {
         }
     }
 
-    fn handle_scan_panel_key(&mut self, code: KeyCode) -> anyhow::Result<Option<UiExit>> {
-        match code {
+    fn handle_scan_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('u') => {
+                    self.scan_panel.input.clear();
+                    return Ok(None);
+                }
+                KeyCode::Char('t') => {
+                    self.ctx.settings.cycle_scan_scope();
+                    return Ok(None);
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
             KeyCode::Esc => {
                 self.scan_panel.open = false;
                 self.scan_panel.error = None;
                 Ok(None)
             }
-            KeyCode::Enter | KeyCode::Char('o') => {
+            KeyCode::Enter => {
                 let roots = parse_roots_input(&self.scan_panel.input);
                 if roots.is_empty() {
                     self.scan_panel.error = Some("Enter at least one path".to_string());
@@ -192,10 +196,6 @@ impl Ui {
             }
             KeyCode::Backspace => {
                 self.scan_panel.input.pop();
-                Ok(None)
-            }
-            KeyCode::Char('c') => {
-                self.scan_panel.input.clear();
                 Ok(None)
             }
             KeyCode::Char(ch) => {
@@ -231,22 +231,18 @@ impl Ui {
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(layout[1]);
 
-        frame.render_widget(self.draw_library(), body_layout[0]);
+        self.draw_library(frame, body_layout[0]);
         frame.render_widget(self.draw_details(), body_layout[1]);
 
         let footer = Paragraph::new(Line::from(vec![
-            Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" quit  "),
-            Span::styled("j/k", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" move  "),
             Span::styled("o", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scan paths  "),
             Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" preview panel  "),
-            Span::styled("m", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" cycle preview  "),
-            Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" toggle scan"),
+            Span::raw(" preview settings"),
         ]))
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::TOP));
@@ -261,9 +257,11 @@ impl Ui {
         }
     }
 
-    fn draw_library(&self) -> Paragraph<'static> {
-        let mut lines = Vec::new();
+    fn draw_library(&self, frame: &mut ratatui::Frame, area: Rect) {
+        let block = Block::default().borders(Borders::ALL).title("Library");
+
         if self.ctx.books.is_empty() {
+            let mut lines = Vec::new();
             lines.push(Line::raw("No PDFs found."));
             lines.push(Line::raw(""));
             lines.push(Line::raw("Roots:"));
@@ -274,21 +272,40 @@ impl Ui {
                     lines.push(Line::raw(format!("- {root}")));
                 }
             }
-        } else {
-            for (idx, book) in self.ctx.books.iter().enumerate() {
-                let is_selected = idx == self.ctx.selected;
-                let style = if is_selected {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::styled(book.title.clone(), style));
-            }
+
+            let paragraph = Paragraph::new(Text::from(lines))
+                .block(block)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, area);
+            return;
         }
 
-        Paragraph::new(Text::from(lines))
-            .block(Block::default().borders(Borders::ALL).title("Library"))
-            .wrap(Wrap { trim: true })
+        let max_title_width = area.width.saturating_sub(6) as usize;
+        let items: Vec<ListItem> = self
+            .ctx
+            .books
+            .iter()
+            .map(|book| {
+                let wrapped = wrap_text(&book.title, max_title_width.max(8));
+                let lines = wrapped.into_iter().map(Line::raw).collect::<Vec<_>>();
+                ListItem::new(Text::from(lines))
+            })
+            .collect();
+
+        let highlight_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+
+        let mut state = ListState::default();
+        state.select(self.ctx.books.get(self.ctx.selected).map(|_| self.ctx.selected));
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn draw_details(&self) -> Paragraph<'static> {
@@ -357,23 +374,11 @@ impl Ui {
             ),
         ]);
 
-        let scope = Line::from(vec![
-            Span::styled("Scan scope: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(
-                self.preview_panel.draft.scan_scope.to_string(),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]);
-
         let help = vec![
             Line::raw(""),
             Line::from(vec![
                 Span::styled("Tab/m", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cycle preview mode"),
-            ]),
-            Line::from(vec![
-                Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" toggle scan scope"),
             ]),
             Line::from(vec![
                 Span::styled("+/- or ↑/↓", Style::default().add_modifier(Modifier::BOLD)),
@@ -387,7 +392,7 @@ impl Ui {
             ]),
         ];
 
-        let text = Text::from([vec![mode, depth, scope], help].concat());
+        let text = Text::from([vec![mode, depth], help].concat());
 
         let panel = Paragraph::new(text)
             .block(block)
@@ -422,6 +427,11 @@ impl Ui {
             Span::raw(self.ctx.cwd.clone()),
         ]));
         lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("scan scope: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(self.ctx.settings.scan_scope.to_string()),
+        ]));
+        lines.push(Line::raw(""));
 
         if let Some(err) = &self.scan_panel.error {
             lines.push(Line::styled(
@@ -432,14 +442,16 @@ impl Ui {
         }
 
         lines.push(Line::from(vec![
-            Span::styled("o/Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" apply + rescan  "),
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" cancel  "),
             Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" delete  "),
-            Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" clear"),
+            Span::styled("Ctrl+U", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" clear  "),
+            Span::styled("Ctrl+T", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle scope"),
         ]));
 
         let panel = Paragraph::new(Text::from(lines))
@@ -526,4 +538,67 @@ fn parse_roots_input(input: &str) -> Vec<String> {
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        let sep_width = if current.is_empty() { 0 } else { 1 };
+
+        if current_width + sep_width + word_width <= max_width {
+            if !current.is_empty() {
+                current.push(' ');
+                current_width += 1;
+            }
+            current.push_str(word);
+            current_width += word_width;
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+
+        if word_width <= max_width {
+            current.push_str(word);
+            current_width = word_width;
+            continue;
+        }
+
+        let mut chunk = String::new();
+        let mut chunk_width = 0usize;
+        for ch in word.chars() {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            let w = UnicodeWidthStr::width(s);
+            if chunk_width + w > max_width && !chunk.is_empty() {
+                lines.push(std::mem::take(&mut chunk));
+                chunk_width = 0;
+            }
+            chunk.push(ch);
+            chunk_width += w;
+        }
+        if !chunk.is_empty() {
+            lines.push(std::mem::take(&mut chunk));
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
 }

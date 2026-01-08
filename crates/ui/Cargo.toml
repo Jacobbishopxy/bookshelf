@@ -10,3 +10,4 @@ bookshelf_engine = { package = "engine", path = "../engine" }
 anyhow.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+unicode-width.workspace = true
