@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{MAX_PREVIEW_DEPTH, MAX_PREVIEW_PAGES, Settings};
+use bookshelf_core::{MAX_PREVIEW_DEPTH, MAX_PREVIEW_PAGES, PreviewMode, Settings};
 use bookshelf_engine::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -181,11 +181,11 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Left => {
-                self.reader.prev_page(&self.engine);
+                self.reader.prev_page();
                 Ok(None)
             }
             KeyCode::Right => {
-                self.reader.next_page(&self.engine);
+                self.reader.next_page();
                 Ok(None)
             }
             KeyCode::Up => {
@@ -396,7 +396,7 @@ impl Ui {
             .split(layout[1]);
 
         self.draw_library(frame, body_layout[0]);
-        frame.render_widget(self.draw_details(), body_layout[1]);
+        frame.render_widget(self.draw_details(body_layout[1]), body_layout[1]);
 
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -449,6 +449,11 @@ impl Ui {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(header, layout[0]);
+
+        let inner_width = layout[1].width.saturating_sub(2);
+        let inner_height = layout[1].height.saturating_sub(2);
+        self.reader
+            .ensure_rendered(&self.ctx, &self.engine, inner_width, inner_height);
 
         let content = self.reader.current_text.clone().unwrap_or_else(|| {
             self.reader
@@ -578,7 +583,7 @@ impl Ui {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn draw_details(&self) -> Paragraph<'static> {
+    fn draw_details(&self, area: Rect) -> Paragraph<'static> {
         let mut lines = Vec::new();
         lines.push(Line::from(vec![
             Span::styled("Preview: ", Style::default().add_modifier(Modifier::BOLD)),
@@ -600,6 +605,7 @@ impl Ui {
         lines.push(Line::raw(""));
 
         if let Some(book) = self.ctx.books.get(self.ctx.selected) {
+            let preview_width = area.width.saturating_sub(2);
             lines.push(Line::from(vec![
                 Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(book.title.clone()),
@@ -607,7 +613,9 @@ impl Ui {
             lines.push(Line::raw(book.path.clone()));
             lines.push(Line::raw(""));
 
-            let preview = self.engine.render_preview_for(book, &self.ctx.settings);
+            let preview = self
+                .engine
+                .render_preview_for(book, &self.ctx.settings, preview_width);
             for line in preview.lines().take(self.ctx.settings.preview_depth.max(1)) {
                 lines.push(Line::raw(line.to_string()));
             }
@@ -939,6 +947,14 @@ struct SettingsPanel {
     selected: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReaderRenderKey {
+    page: u32,
+    mode: PreviewMode,
+    width: u16,
+    height: u16,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ReaderPanel {
     open: bool,
@@ -950,6 +966,7 @@ struct ReaderPanel {
     current_text: Option<String>,
     last_error: Option<String>,
     notice: Option<String>,
+    render_key: Option<ReaderRenderKey>,
 }
 
 impl ReaderPanel {
@@ -957,9 +974,6 @@ impl ReaderPanel {
         self.open = true;
         self.book_path = Some(book.path.clone());
         self.book_title = Some(book.title.clone());
-        self.scroll = 0;
-        self.last_error = None;
-        self.notice = None;
         let saved = ctx.progress_by_path.get(&book.path).copied().unwrap_or(1);
         self.page = saved.saturating_sub(1);
         self.total_pages = engine.page_count(book).ok();
@@ -968,7 +982,7 @@ impl ReaderPanel {
                 self.page = self.page.min(total.saturating_sub(1));
             }
         }
-        self.reload(engine);
+        self.invalidate_render();
     }
 
     fn current_book(&self) -> Option<bookshelf_core::Book> {
@@ -978,17 +992,50 @@ impl ReaderPanel {
         })
     }
 
-    fn reload(&mut self, engine: &Engine) {
+    fn invalidate_render(&mut self) {
         self.scroll = 0;
+        self.current_text = None;
+        self.last_error = None;
         self.notice = None;
+        self.render_key = None;
+    }
+
+    fn ensure_rendered(&mut self, ctx: &AppContext, engine: &Engine, width: u16, height: u16) {
+        let width = width.max(1);
+        let height = height.max(1);
+        let mode = ctx.settings.preview_mode;
+
         let Some(book) = self.current_book() else {
             self.current_text = None;
             self.last_error = Some("no book".to_string());
+            self.render_key = Some(ReaderRenderKey {
+                page: self.page,
+                mode,
+                width,
+                height,
+            });
             return;
         };
 
-        match engine.render_page_text(&book, self.page) {
+        let key = ReaderRenderKey {
+            page: self.page,
+            mode,
+            width,
+            height,
+        };
+
+        if self.current_text.is_some() && self.render_key == Some(key) {
+            return;
+        }
+
+        match engine.render_page_for_reader(&book, self.page, mode, width, height) {
             Ok(text) => {
+                let lines = text.lines().count() as u16;
+                if lines == 0 {
+                    self.scroll = 0;
+                } else {
+                    self.scroll = self.scroll.min(lines.saturating_sub(1));
+                }
                 self.current_text = Some(text);
                 self.last_error = None;
             }
@@ -997,24 +1044,26 @@ impl ReaderPanel {
                 self.last_error = Some(err.to_string());
             }
         }
+
+        self.render_key = Some(key);
     }
 
-    fn next_page(&mut self, engine: &Engine) {
+    fn next_page(&mut self) {
         let Some(total) = self.total_pages else {
             self.page = self.page.saturating_add(1);
-            self.reload(engine);
+            self.invalidate_render();
             return;
         };
         if total == 0 {
             return;
         }
         self.page = (self.page + 1).min(total - 1);
-        self.reload(engine);
+        self.invalidate_render();
     }
 
-    fn prev_page(&mut self, engine: &Engine) {
+    fn prev_page(&mut self) {
         self.page = self.page.saturating_sub(1);
-        self.reload(engine);
+        self.invalidate_render();
     }
 
     fn scroll_up(&mut self) {

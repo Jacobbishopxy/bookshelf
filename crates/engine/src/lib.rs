@@ -1,9 +1,12 @@
-//! PDF engine wrapper (using `pdf` crate later).
+//! PDF engine wrapper.
 
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use bookshelf_core::{Book, PreviewMode, Settings};
+use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
 use pdf::font::ToUnicodeMap;
@@ -11,42 +14,53 @@ use pdf::object::{Resolve, Resources};
 use pdf::primitive::{Name, PdfString};
 
 #[derive(Debug, Default)]
-pub struct Engine;
+pub struct Engine {
+    pdfium: RefCell<PdfiumState>,
+}
+
+#[derive(Debug)]
+enum PdfiumState {
+    Uninitialized,
+    Available(Pdfium),
+    Unavailable(String),
+}
+
+impl Default for PdfiumState {
+    fn default() -> Self {
+        Self::Uninitialized
+    }
+}
 
 impl Engine {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
     pub fn preview_depth(&self, settings: &Settings) -> usize {
         settings.preview_depth
     }
 
-    pub fn render_preview(&self, settings: &Settings) -> String {
-        let depth = settings.preview_depth.max(1);
-        match settings.preview_mode {
-            PreviewMode::Text => (1..=depth)
-                .map(|i| format!("text preview line {i}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            PreviewMode::Braille => (1..=depth)
-                .map(|i| format!("braille preview row {i}: ⣿⣿⣷⣄…"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-            PreviewMode::Blocks => (1..=depth)
-                .map(|i| format!("blocks preview row {i}: ███▓▒░…"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-
-    pub fn render_preview_for(&self, book: &Book, settings: &Settings) -> String {
+    pub fn render_preview_for(
+        &self,
+        book: &Book,
+        settings: &Settings,
+        width_chars: u16,
+    ) -> String {
         match settings.preview_mode {
             PreviewMode::Text => match self.render_text_preview(book, settings) {
                 Ok(text) => text,
                 Err(err) => format!("(error reading pdf: {err})"),
             },
-            _ => self.render_preview(settings),
+            PreviewMode::Braille | PreviewMode::Blocks => match self.render_page_thumbnail(
+                book,
+                0,
+                settings.preview_mode,
+                width_chars,
+                settings.preview_depth.max(1) as u16,
+            ) {
+                Ok(text) => text,
+                Err(err) => format!("(error rendering pdf: {err})"),
+            },
         }
     }
 
@@ -171,6 +185,177 @@ impl Engine {
         Ok(out)
     }
 
+    pub fn render_page_for_reader(
+        &self,
+        book: &Book,
+        page_index: u32,
+        mode: PreviewMode,
+        viewport_width_chars: u16,
+        viewport_height_chars: u16,
+    ) -> anyhow::Result<String> {
+        match mode {
+            PreviewMode::Text => self.render_page_text(book, page_index),
+            PreviewMode::Braille | PreviewMode::Blocks => {
+                let viewport_height_chars = viewport_height_chars.max(1);
+                let max_height_chars = viewport_height_chars.saturating_mul(12);
+                self.render_page_raster(
+                    book,
+                    page_index,
+                    mode,
+                    viewport_width_chars.max(1),
+                    max_height_chars.max(viewport_height_chars),
+                )
+            }
+        }
+    }
+
+    fn render_page_thumbnail(
+        &self,
+        book: &Book,
+        page_index: u32,
+        mode: PreviewMode,
+        width_chars: u16,
+        height_chars: u16,
+    ) -> anyhow::Result<String> {
+        match mode {
+            PreviewMode::Text => self.render_page_text(book, page_index),
+            PreviewMode::Braille | PreviewMode::Blocks => {
+                self.render_page_raster(book, page_index, mode, width_chars, height_chars.max(1))
+            }
+        }
+    }
+
+    fn render_page_raster(
+        &self,
+        book: &Book,
+        page_index: u32,
+        mode: PreviewMode,
+        width_chars: u16,
+        max_height_chars: u16,
+    ) -> anyhow::Result<String> {
+        let width_chars = width_chars.max(1) as usize;
+        let max_height_chars = max_height_chars.max(1) as usize;
+
+        let (cell_w, cell_h) = match mode {
+            PreviewMode::Braille => (2usize, 4usize),
+            PreviewMode::Blocks => (2usize, 4usize),
+            PreviewMode::Text => anyhow::bail!("text mode does not use raster rendering"),
+        };
+
+        let pixel_width = (width_chars.saturating_mul(cell_w))
+            .try_into()
+            .unwrap_or(i32::MAX);
+        let pixel_max_height = (max_height_chars.saturating_mul(cell_h))
+            .try_into()
+            .unwrap_or(i32::MAX);
+
+        let bitmap = self.render_page_bitmap_gray(book, page_index, pixel_width, pixel_max_height)?;
+
+        let out_width = div_ceil(bitmap.width, cell_w).min(width_chars);
+        let out_height = div_ceil(bitmap.height, cell_h).min(max_height_chars);
+
+        let mut out = String::new();
+        for row in 0..out_height {
+            if row > 0 {
+                out.push('\n');
+            }
+
+            match mode {
+                PreviewMode::Braille => {
+                    for col in 0..out_width {
+                        out.push(braille_cell(&bitmap, col * cell_w, row * cell_h));
+                    }
+                }
+                PreviewMode::Blocks => {
+                    for col in 0..out_width {
+                        out.push(blocks_cell(&bitmap, col * cell_w, row * cell_h));
+                    }
+                }
+                PreviewMode::Text => {}
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn render_page_bitmap_gray(
+        &self,
+        book: &Book,
+        page_index: u32,
+        target_width: i32,
+        max_height: i32,
+    ) -> anyhow::Result<GrayBitmap> {
+        let pdfium = self.pdfium()?;
+        let document = pdfium
+            .load_pdf_from_file(&book.path, None)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let page_index = u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
+        let page = document
+            .pages()
+            .get(page_index)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(target_width.max(1))
+            .set_maximum_width(target_width.max(1))
+            .set_maximum_height(max_height.max(1))
+            .use_grayscale_rendering(true)
+            .set_format(PdfBitmapFormat::Gray);
+
+        let bitmap = page
+            .render_with_config(&render_config)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let width = bitmap.width().max(0) as usize;
+        let height = bitmap.height().max(0) as usize;
+        let pixels = bitmap.as_raw_bytes();
+
+        let stride = if height == 0 { 0 } else { pixels.len() / height };
+
+        Ok(GrayBitmap {
+            width,
+            height,
+            stride,
+            pixels,
+        })
+    }
+
+    fn pdfium(&self) -> anyhow::Result<Ref<'_, Pdfium>> {
+        let init_error = {
+            let mut state = self.pdfium.borrow_mut();
+            match &*state {
+                PdfiumState::Available(_) => None,
+                PdfiumState::Unavailable(err) => Some(err.clone()),
+                PdfiumState::Uninitialized => match bind_pdfium() {
+                    Ok(pdfium) => {
+                        *state = PdfiumState::Available(pdfium);
+                        None
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        *state = PdfiumState::Unavailable(msg.clone());
+                        Some(msg)
+                    }
+                },
+            }
+        };
+
+        if let Some(err) = init_error {
+            return Err(anyhow::anyhow!(err));
+        }
+
+        let state = self.pdfium.borrow();
+        match &*state {
+            PdfiumState::Available(_) => Ok(Ref::map(state, |state| match state {
+                PdfiumState::Available(pdfium) => pdfium,
+                _ => unreachable!("pdfium state checked above"),
+            })),
+            PdfiumState::Unavailable(err) => Err(anyhow::anyhow!(err.clone())),
+            PdfiumState::Uninitialized => unreachable!("pdfium state initialized above"),
+        }
+    }
+
     fn render_text_preview(&self, book: &Book, settings: &Settings) -> anyhow::Result<String> {
         let file = FileOptions::cached().open(&book.path)?;
         let resolver = file.resolver();
@@ -223,6 +408,112 @@ impl Engine {
             Ok(out.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct GrayBitmap {
+    width: usize,
+    height: usize,
+    stride: usize,
+    pixels: Vec<u8>,
+}
+
+impl GrayBitmap {
+    fn get(&self, x: usize, y: usize) -> u8 {
+        if x >= self.width || y >= self.height {
+            return 255;
+        }
+        let idx = y.saturating_mul(self.stride).saturating_add(x);
+        self.pixels.get(idx).copied().unwrap_or(255)
+    }
+}
+
+fn div_ceil(value: usize, divisor: usize) -> usize {
+    if divisor == 0 {
+        return 0;
+    }
+    (value + divisor - 1) / divisor
+}
+
+fn braille_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
+    const THRESHOLD: u8 = 200;
+
+    let mut bits = 0u8;
+    for dy in 0..4 {
+        for dx in 0..2 {
+            let pixel = bitmap.get(x0 + dx, y0 + dy);
+            if pixel >= THRESHOLD {
+                continue;
+            }
+
+            let bit = match (dx, dy) {
+                (0, 0) => 0x01,
+                (0, 1) => 0x02,
+                (0, 2) => 0x04,
+                (0, 3) => 0x40,
+                (1, 0) => 0x08,
+                (1, 1) => 0x10,
+                (1, 2) => 0x20,
+                (1, 3) => 0x80,
+                _ => 0,
+            };
+            bits |= bit;
+        }
+    }
+
+    char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
+}
+
+fn blocks_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
+    let mut sum = 0u32;
+    let mut count = 0u32;
+    for dy in 0..4 {
+        for dx in 0..2 {
+            sum += bitmap.get(x0 + dx, y0 + dy) as u32;
+            count += 1;
+        }
+    }
+
+    let avg = if count == 0 { 255 } else { (sum / count) as u8 };
+    let darkness = 255u8.saturating_sub(avg);
+
+    match darkness {
+        0..=31 => ' ',
+        32..=95 => '░',
+        96..=159 => '▒',
+        160..=223 => '▓',
+        _ => '█',
+    }
+}
+
+fn bind_pdfium() -> anyhow::Result<Pdfium> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
+        }
+    }
+
+    candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(".")));
+
+    for path in candidates {
+        if let Ok(bindings) = Pdfium::bind_to_library(&path) {
+            return Ok(Pdfium::new(bindings));
+        }
+    }
+
+    let bindings = Pdfium::bind_to_system_library()
+        .map_err(|err| anyhow::anyhow!(err))
+        .map_err(|err| {
+            let lib_name = Pdfium::pdfium_platform_library_name();
+            anyhow::anyhow!(
+                "{err}\n\nPdfium library not found.\n- Install it system-wide, or\n- Place {} next to the executable.\n",
+                lib_name.to_string_lossy()
+            )
+        })?;
+
+    Ok(Pdfium::new(bindings))
 }
 
 fn dump_text_op(
@@ -464,28 +755,45 @@ mod tests {
     }
 
     #[test]
-    fn renders_preview_for_each_mode() {
-        let engine = Engine::new();
-
-        let settings = Settings {
-            preview_mode: PreviewMode::Text,
-            preview_depth: 2,
-            ..Settings::default()
+    fn braille_cell_renders_full_block() {
+        let bitmap = GrayBitmap {
+            width: 2,
+            height: 4,
+            stride: 2,
+            pixels: vec![0; 8],
         };
-        assert!(engine.render_preview(&settings).contains("text preview"));
+        assert_eq!(braille_cell(&bitmap, 0, 0), '⣿');
+    }
 
-        let settings = Settings {
-            preview_mode: PreviewMode::Braille,
-            preview_depth: 2,
-            ..Settings::default()
+    #[test]
+    fn braille_cell_renders_single_dot() {
+        let mut pixels = vec![255u8; 8];
+        pixels[0] = 0;
+        let bitmap = GrayBitmap {
+            width: 2,
+            height: 4,
+            stride: 2,
+            pixels,
         };
-        assert!(engine.render_preview(&settings).contains("braille preview"));
+        assert_eq!(braille_cell(&bitmap, 0, 0), '⠁');
+    }
 
-        let settings = Settings {
-            preview_mode: PreviewMode::Blocks,
-            preview_depth: 2,
-            ..Settings::default()
+    #[test]
+    fn blocks_cell_renders_shades() {
+        let white = GrayBitmap {
+            width: 2,
+            height: 4,
+            stride: 2,
+            pixels: vec![255; 8],
         };
-        assert!(engine.render_preview(&settings).contains("blocks preview"));
+        assert_eq!(blocks_cell(&white, 0, 0), ' ');
+
+        let black = GrayBitmap {
+            width: 2,
+            height: 4,
+            stride: 2,
+            pixels: vec![0; 8],
+        };
+        assert_eq!(blocks_cell(&black, 0, 0), '█');
     }
 }

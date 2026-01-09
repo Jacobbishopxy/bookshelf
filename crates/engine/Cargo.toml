@@ -7,3 +7,4 @@ version.workspace = true
 bookshelf_core = { package = "bookshelf-core", path = "../core" }
 anyhow.workspace = true
 pdf.workspace = true
+pdfium-render.workspace = true
