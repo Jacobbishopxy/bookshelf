@@ -10,9 +10,13 @@ pub struct BookId(pub String);
 pub struct Settings {
     pub preview_mode: PreviewMode,
     pub preview_depth: usize,
+    pub preview_pages: usize,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
 }
+
+pub const MAX_PREVIEW_DEPTH: usize = 200;
+pub const MAX_PREVIEW_PAGES: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -90,6 +94,7 @@ impl Default for Settings {
         Self {
             preview_mode: PreviewMode::Text,
             preview_depth: 5,
+            preview_pages: 2,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
         }
@@ -98,7 +103,8 @@ impl Default for Settings {
 
 impl Settings {
     pub fn normalize(&mut self) {
-        self.preview_depth = self.preview_depth.clamp(1, 200);
+        self.preview_depth = self.preview_depth.clamp(1, MAX_PREVIEW_DEPTH);
+        self.preview_pages = self.preview_pages.clamp(1, MAX_PREVIEW_PAGES);
         self.library_roots = self
             .library_roots
             .iter()
@@ -199,10 +205,12 @@ mod tests {
             preview_mode: PreviewMode::Text,
             preview_depth: 0,
             scan_scope: ScanScope::Direct,
+            preview_pages: 0,
             library_roots: vec![" ".to_string(), "/a".to_string(), "/a".to_string(), " /b ".to_string()],
         };
         settings.normalize();
         assert_eq!(settings.preview_depth, 1);
+        assert_eq!(settings.preview_pages, 1);
         assert_eq!(settings.library_roots, vec!["/a".to_string(), "/b".to_string()]);
     }
 

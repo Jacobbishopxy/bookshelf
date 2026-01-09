@@ -1,5 +1,7 @@
 //! Application orchestration layer for Bookshelf.
 
+use std::collections::HashMap;
+
 use bookshelf_core::{Book, Progress, Settings};
 
 #[derive(Debug, Clone)]
@@ -8,6 +10,7 @@ pub struct AppContext {
     pub cwd: String,
     pub books: Vec<Book>,
     pub selected: usize,
+    pub progress_by_path: HashMap<String, u32>,
 }
 
 impl AppContext {
@@ -17,6 +20,7 @@ impl AppContext {
             cwd: String::new(),
             books: Vec::new(),
             selected: 0,
+            progress_by_path: HashMap::new(),
         }
     }
 
@@ -24,6 +28,11 @@ impl AppContext {
         self.cwd = cwd;
         self.books = books;
         self.selected = self.selected.min(self.books.len().saturating_sub(1));
+        self
+    }
+
+    pub fn with_progress(mut self, progress_by_path: HashMap<String, u32>) -> Self {
+        self.progress_by_path = progress_by_path;
         self
     }
 }

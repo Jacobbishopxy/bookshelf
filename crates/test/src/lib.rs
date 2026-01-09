@@ -6,6 +6,7 @@ pub fn make_settings(preview_depth: usize) -> Settings {
     Settings {
         preview_mode: PreviewMode::Text,
         preview_depth,
+        preview_pages: 2,
         scan_scope: ScanScope::Recursive,
         library_roots: Vec::new(),
     }

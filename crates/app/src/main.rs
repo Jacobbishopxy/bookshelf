@@ -37,21 +37,28 @@ fn run() -> anyhow::Result<()> {
 
     sync_library(&storage, &settings, &cwd)?;
     let books = storage.list_books()?;
+    let progress_by_path = storage.list_progress()?;
 
-    let mut ctx = AppContext::new(settings).with_library(cwd_str, books);
+    let mut ctx = AppContext::new(settings)
+        .with_library(cwd_str, books)
+        .with_progress(progress_by_path);
     loop {
         let mut ui = Ui::new(ctx);
         let outcome = ui.run()?;
         ctx = outcome.ctx;
         storage.save_settings(&ctx.settings)?;
+        for (path, last_page) in ctx.progress_by_path.iter() {
+            storage.set_progress(path, *last_page)?;
+        }
 
         match outcome.exit {
             UiExit::Quit => break,
             UiExit::Rescan => {
                 sync_library(&storage, &ctx.settings, &cwd)?;
                 let books = storage.list_books()?;
+                let progress_by_path = storage.list_progress()?;
                 let cwd_str = ctx.cwd.clone();
-                ctx = ctx.with_library(cwd_str, books);
+                ctx = ctx.with_library(cwd_str, books).with_progress(progress_by_path);
             }
         }
     }
