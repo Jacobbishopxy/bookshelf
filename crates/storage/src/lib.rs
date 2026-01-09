@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::Context as _;
-use bookshelf_core::{Book, PreviewMode, ScanScope, Settings};
+use bookshelf_core::{Book, Bookmark, Note, PreviewMode, ScanScope, Settings};
 use rusqlite::{Connection, OptionalExtension as _};
 
 #[derive(Debug)]
@@ -45,6 +45,20 @@ impl Storage {
                 path TEXT PRIMARY KEY REFERENCES books(path) ON DELETE CASCADE,
                 last_page INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                path TEXT NOT NULL REFERENCES books(path) ON DELETE CASCADE,
+                page INTEGER NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (path, page, label)
+            );
+
+            CREATE TABLE IF NOT EXISTS notes (
+                path TEXT NOT NULL REFERENCES books(path) ON DELETE CASCADE,
+                page INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                PRIMARY KEY (path, page, body)
             );
             "#,
         )?;
@@ -168,14 +182,94 @@ impl Storage {
     pub fn list_books(&self) -> anyhow::Result<Vec<Book>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT path, title FROM books ORDER BY title COLLATE NOCASE")?;
+            .prepare("SELECT path, title, last_opened FROM books ORDER BY title COLLATE NOCASE")?;
         let rows = stmt.query_map([], |row| {
             Ok(Book {
                 path: row.get(0)?,
                 title: row.get(1)?,
+                last_opened: row.get(2)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn set_last_opened(&self, path: &str, last_opened: i64) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE books SET last_opened = ? WHERE path = ?",
+            (last_opened, path),
+        )?;
+        Ok(())
+    }
+
+    pub fn list_bookmarks_by_path(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<Bookmark>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, page, label FROM bookmarks ORDER BY path, page, label")?;
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let page: i64 = row.get(1)?;
+            let label: String = row.get(2)?;
+            let page = u32::try_from(page).unwrap_or(1).max(1);
+            Ok((path, Bookmark { page, label }))
+        })?;
+
+        let mut out: std::collections::HashMap<String, Vec<Bookmark>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (path, bookmark) = row?;
+            out.entry(path).or_default().push(bookmark);
+        }
+        Ok(out)
+    }
+
+    pub fn replace_bookmarks(&self, path: &str, bookmarks: &[Bookmark]) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM bookmarks WHERE path = ?", [path])?;
+        for bookmark in bookmarks {
+            let page = bookmark.page.max(1) as i64;
+            tx.execute(
+                "INSERT OR IGNORE INTO bookmarks (path, page, label) VALUES (?, ?, ?)",
+                (path, page, bookmark.label.as_str()),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_notes_by_path(&self) -> anyhow::Result<std::collections::HashMap<String, Vec<Note>>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path, page, body FROM notes ORDER BY path, page, body")?;
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let page: i64 = row.get(1)?;
+            let body: String = row.get(2)?;
+            let page = u32::try_from(page).unwrap_or(1).max(1);
+            Ok((path, Note { page, body }))
+        })?;
+
+        let mut out: std::collections::HashMap<String, Vec<Note>> = std::collections::HashMap::new();
+        for row in rows {
+            let (path, note) = row?;
+            out.entry(path).or_default().push(note);
+        }
+        Ok(out)
+    }
+
+    pub fn replace_notes(&self, path: &str, notes: &[Note]) -> anyhow::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM notes WHERE path = ?", [path])?;
+        for note in notes {
+            let page = note.page.max(1) as i64;
+            tx.execute(
+                "INSERT OR IGNORE INTO notes (path, page, body) VALUES (?, ?, ?)",
+                (path, page, note.body.as_str()),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn delete_book_by_path(&self, path: &str) -> anyhow::Result<()> {
@@ -253,6 +347,7 @@ mod tests {
         let book = Book {
             path: "/a/b.pdf".to_string(),
             title: "b".to_string(),
+            last_opened: None,
         };
         storage.upsert_book(&book)?;
         let books = storage.list_books()?;
@@ -266,6 +361,7 @@ mod tests {
         let book = Book {
             path: "/a/b.pdf".to_string(),
             title: "b".to_string(),
+            last_opened: None,
         };
         storage.upsert_book(&book)?;
 
@@ -276,6 +372,52 @@ mod tests {
         storage.delete_book_by_path(&book.path)?;
         let progress = storage.list_progress()?;
         assert!(progress.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn bookmarks_and_notes_cascade_on_delete() -> anyhow::Result<()> {
+        let storage = open_in_memory()?;
+        let book = Book {
+            path: "/a/b.pdf".to_string(),
+            title: "b".to_string(),
+            last_opened: None,
+        };
+        storage.upsert_book(&book)?;
+
+        storage.replace_bookmarks(
+            &book.path,
+            &[Bookmark {
+                page: 2,
+                label: "start".to_string(),
+            }],
+        )?;
+        storage.replace_notes(
+            &book.path,
+            &[Note {
+                page: 2,
+                body: "hello".to_string(),
+            }],
+        )?;
+
+        assert_eq!(
+            storage.list_bookmarks_by_path()?.get(&book.path).cloned(),
+            Some(vec![Bookmark {
+                page: 2,
+                label: "start".to_string()
+            }])
+        );
+        assert_eq!(
+            storage.list_notes_by_path()?.get(&book.path).cloned(),
+            Some(vec![Note {
+                page: 2,
+                body: "hello".to_string()
+            }])
+        );
+
+        storage.delete_book_by_path(&book.path)?;
+        assert!(storage.list_bookmarks_by_path()?.is_empty());
+        assert!(storage.list_notes_by_path()?.is_empty());
         Ok(())
     }
 }

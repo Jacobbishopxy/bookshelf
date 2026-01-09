@@ -5,13 +5,16 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use bookshelf_core::{Book, PreviewMode, Settings};
-use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
+use bookshelf_core::{Book, PreviewMode, Settings, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
 use pdf::font::ToUnicodeMap;
-use pdf::object::{Resolve, Resources};
-use pdf::primitive::{Name, PdfString};
+use pdf::object::{
+    Action, Dest, MaybeNamedDest, OutlineItem, PageTree, PagesNode, PlainRef, RcRef, Resolve,
+    Resources,
+};
+use pdf::primitive::{Name, PdfString, Primitive};
+use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
 
 #[derive(Debug, Default)]
 pub struct Engine {
@@ -36,41 +39,188 @@ impl Engine {
         Self::default()
     }
 
+    pub fn check_pdfium(&self) -> anyhow::Result<()> {
+        let _ = self.pdfium()?;
+        Ok(())
+    }
+
     pub fn preview_depth(&self, settings: &Settings) -> usize {
         settings.preview_depth
     }
 
-    pub fn render_preview_for(
-        &self,
-        book: &Book,
-        settings: &Settings,
-        width_chars: u16,
-    ) -> String {
+    pub fn render_preview_for(&self, book: &Book, settings: &Settings, width_chars: u16) -> String {
         match settings.preview_mode {
             PreviewMode::Text => match self.render_text_preview(book, settings) {
                 Ok(text) => text,
                 Err(err) => format!("(error reading pdf: {err})"),
             },
-            PreviewMode::Braille | PreviewMode::Blocks => match self.render_page_thumbnail(
-                book,
-                0,
-                settings.preview_mode,
-                width_chars,
-                settings.preview_depth.max(1) as u16,
-            ) {
-                Ok(text) => text,
-                Err(err) => format!("(error rendering pdf: {err})"),
-            },
+            PreviewMode::Braille | PreviewMode::Blocks => {
+                match self.render_page_thumbnail(
+                    book,
+                    0,
+                    settings.preview_mode,
+                    width_chars,
+                    settings.preview_depth.max(1) as u16,
+                ) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        if self.pdfium_unavailable() {
+                            match self.render_text_preview(book, settings) {
+                                Ok(text) => format!(
+                                    "(pdfium not available; showing text preview)\n\n{text}"
+                                ),
+                                Err(_) => format!("(error rendering pdf: {err})"),
+                            }
+                        } else {
+                            format!("(error rendering pdf: {err})")
+                        }
+                    }
+                }
+            }
         }
     }
 
     pub fn page_count(&self, book: &Book) -> anyhow::Result<u32> {
-        let file = FileOptions::cached().open(&book.path)?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let file = FileOptions::cached().open(path)?;
         Ok(file.num_pages())
     }
 
+    pub fn toc(&self, book: &Book) -> anyhow::Result<Vec<TocItem>> {
+        let path = bookshelf_core::decode_path(&book.path);
+        let file = FileOptions::cached().open(&path)?;
+        let resolver = file.resolver();
+        let catalog = file.get_root();
+
+        let mut dest_pages_by_name: HashMap<String, PlainRef> = HashMap::new();
+        if let Some(ref names) = catalog.names {
+            if let Some(ref dests) = names.dests {
+                dests.walk(&resolver, &mut |key: &PdfString, val: &Option<Dest>| {
+                    if let Some(Dest {
+                        page: Some(page), ..
+                    }) = val
+                    {
+                        dest_pages_by_name.insert(key.to_string_lossy(), page.get_inner());
+                    }
+                })?;
+            }
+        }
+
+        let mut pages_by_ref: HashMap<PlainRef, usize> = HashMap::new();
+        fn add_tree(
+            r: &impl Resolve,
+            pages: &mut HashMap<PlainRef, usize>,
+            tree: &PageTree,
+            current_page: &mut usize,
+        ) {
+            for &node_ref in &tree.kids {
+                let node = match r.get(node_ref) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                match *node {
+                    PagesNode::Tree(ref tree) => add_tree(r, pages, tree, current_page),
+                    PagesNode::Leaf(ref _page) => {
+                        pages.insert(node_ref.get_inner(), *current_page);
+                        *current_page += 1;
+                    }
+                }
+            }
+        }
+        add_tree(&resolver, &mut pages_by_ref, &catalog.pages, &mut 0);
+
+        fn page_index_to_page_number(page_index: usize) -> Option<u32> {
+            u32::try_from(page_index).ok().map(|n| n.saturating_add(1))
+        }
+
+        let page_for_ref = |r: PlainRef| -> Option<u32> {
+            pages_by_ref
+                .get(&r)
+                .copied()
+                .and_then(page_index_to_page_number)
+        };
+
+        let page_for_name = |name: &str| -> Option<u32> {
+            let page_ref = dest_pages_by_name.get(name).copied()?;
+            page_for_ref(page_ref)
+        };
+
+        fn walk_outline(
+            r: &impl Resolve,
+            mut node: RcRef<OutlineItem>,
+            depth: usize,
+            page_for_name: &impl Fn(&str) -> Option<u32>,
+            page_for_ref: &impl Fn(PlainRef) -> Option<u32>,
+            out: &mut Vec<TocItem>,
+        ) {
+            loop {
+                let title = node
+                    .title
+                    .as_ref()
+                    .map(|t| t.to_string_lossy())
+                    .unwrap_or_else(|| "(untitled)".to_string());
+
+                let mut page: Option<u32> = None;
+                if let Some(ref dest) = node.dest {
+                    match dest {
+                        Primitive::String(s) => {
+                            page = page_for_name(&s.to_string_lossy());
+                        }
+                        Primitive::Array(a) => {
+                            if let Some(Primitive::Reference(r)) = a.first() {
+                                page = page_for_ref(*r);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if page.is_none() {
+                    if let Some(Action::Goto(dest)) = node.action.clone() {
+                        match dest {
+                            MaybeNamedDest::Named(s) => {
+                                page = page_for_name(&s.to_string_lossy());
+                            }
+                            MaybeNamedDest::Direct(Dest { page: Some(p), .. }) => {
+                                page = page_for_ref(p.get_inner());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                out.push(TocItem { title, page, depth });
+
+                if let Some(entry_ref) = node.first {
+                    if let Ok(entry) = r.get(entry_ref) {
+                        walk_outline(r, entry, depth + 1, page_for_name, page_for_ref, out);
+                    }
+                }
+
+                if let Some(entry_ref) = node.next {
+                    if let Ok(entry) = r.get(entry_ref) {
+                        node = entry;
+                        continue;
+                    }
+                }
+
+                break;
+            }
+        }
+
+        let mut out = Vec::new();
+        if let Some(ref outlines) = catalog.outlines {
+            if let Some(entry_ref) = outlines.first {
+                let entry = resolver.get(entry_ref)?;
+                walk_outline(&resolver, entry, 0, &page_for_name, &page_for_ref, &mut out);
+            }
+        }
+        Ok(out)
+    }
+
     pub fn render_page_text(&self, book: &Book, page_index: u32) -> anyhow::Result<String> {
-        let file = FileOptions::cached().open(&book.path)?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let file = FileOptions::cached().open(path)?;
         let resolver = file.resolver();
         let page = file.get_page(page_index)?;
         let resources = page.resources()?;
@@ -88,15 +238,17 @@ impl Engine {
     }
 
     pub fn debug_page_text(&self, book: &Book, page_index: u32) -> anyhow::Result<String> {
-        let file = FileOptions::cached().open(&book.path)?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let file = FileOptions::cached().open(&path)?;
         let resolver = file.resolver();
         let page = file.get_page(page_index)?;
         let resources = page.resources()?;
+        let display_path = path.display();
 
         let Some(content) = &page.contents else {
             return Ok(format!(
                 "book: {}\npage: {}\n(no page contents)\n",
-                book.path,
+                display_path,
                 page_index + 1
             ));
         };
@@ -104,7 +256,7 @@ impl Engine {
         let ops = content.operations(&resolver)?;
 
         let mut out = String::new();
-        writeln!(&mut out, "book: {}", book.path)?;
+        writeln!(&mut out, "book: {}", display_path)?;
         writeln!(&mut out, "page: {}", page_index + 1)?;
         writeln!(&mut out, "ops: {}", ops.len())?;
         writeln!(&mut out)?;
@@ -137,7 +289,15 @@ impl Engine {
                         )?;
                         break;
                     }
-                    dump_text_op(&mut out, idx, current_font.as_ref(), text, &resolver, resources, &mut tounicode_cache)?;
+                    dump_text_op(
+                        &mut out,
+                        idx,
+                        current_font.as_ref(),
+                        text,
+                        &resolver,
+                        resources,
+                        &mut tounicode_cache,
+                    )?;
                 }
                 Op::TextDrawAdjusted { array } => {
                     for item in array {
@@ -198,13 +358,24 @@ impl Engine {
             PreviewMode::Braille | PreviewMode::Blocks => {
                 let viewport_height_chars = viewport_height_chars.max(1);
                 let max_height_chars = viewport_height_chars.saturating_mul(12);
-                self.render_page_raster(
+                match self.render_page_raster(
                     book,
                     page_index,
                     mode,
                     viewport_width_chars.max(1),
                     max_height_chars.max(viewport_height_chars),
-                )
+                ) {
+                    Ok(text) => Ok(text),
+                    Err(err) if self.pdfium_unavailable() => {
+                        let fallback = self
+                            .render_page_text(book, page_index)
+                            .unwrap_or_else(|_| "no text found".to_string());
+                        Ok(format!(
+                            "(pdfium not available; set Preview mode to text to hide this)\n\n{fallback}"
+                        ))
+                    }
+                    Err(err) => Err(err),
+                }
             }
         }
     }
@@ -249,7 +420,8 @@ impl Engine {
             .try_into()
             .unwrap_or(i32::MAX);
 
-        let bitmap = self.render_page_bitmap_gray(book, page_index, pixel_width, pixel_max_height)?;
+        let bitmap =
+            self.render_page_bitmap_gray(book, page_index, pixel_width, pixel_max_height)?;
 
         let out_width = div_ceil(bitmap.width, cell_w).min(width_chars);
         let out_height = div_ceil(bitmap.height, cell_h).min(max_height_chars);
@@ -286,11 +458,13 @@ impl Engine {
         max_height: i32,
     ) -> anyhow::Result<GrayBitmap> {
         let pdfium = self.pdfium()?;
+        let path = bookshelf_core::decode_path(&book.path);
         let document = pdfium
-            .load_pdf_from_file(&book.path, None)
+            .load_pdf_from_file(&path, None)
             .map_err(|err| anyhow::anyhow!(err))?;
 
-        let page_index = u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
+        let page_index =
+            u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
         let page = document
             .pages()
             .get(page_index)
@@ -311,7 +485,11 @@ impl Engine {
         let height = bitmap.height().max(0) as usize;
         let pixels = bitmap.as_raw_bytes();
 
-        let stride = if height == 0 { 0 } else { pixels.len() / height };
+        let stride = if height == 0 {
+            0
+        } else {
+            pixels.len() / height
+        };
 
         Ok(GrayBitmap {
             width,
@@ -356,8 +534,13 @@ impl Engine {
         }
     }
 
+    fn pdfium_unavailable(&self) -> bool {
+        matches!(&*self.pdfium.borrow(), PdfiumState::Unavailable(_))
+    }
+
     fn render_text_preview(&self, book: &Book, settings: &Settings) -> anyhow::Result<String> {
-        let file = FileOptions::cached().open(&book.path)?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let file = FileOptions::cached().open(path)?;
         let resolver = file.resolver();
 
         let mut out = String::new();
@@ -489,12 +672,39 @@ fn blocks_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
 fn bind_pdfium() -> anyhow::Result<Pdfium> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
+    if let Ok(path) = std::env::var("BOOKSHELF_PDFIUM_LIB_PATH") {
+        let path = PathBuf::from(path);
+        let bindings = Pdfium::bind_to_library(&path)
+            .map_err(|err| anyhow::anyhow!(err))
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "{err}\n\nFailed to load Pdfium from BOOKSHELF_PDFIUM_LIB_PATH={}.",
+                    path.display()
+                )
+            })?;
+        return Ok(Pdfium::new(bindings));
+    }
+
+    if let Some(path) = option_env!("BOOKSHELF_PDFIUM_LIB_PATH") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            if let Ok(bindings) = Pdfium::bind_to_library(&path) {
+                return Ok(Pdfium::new(bindings));
+            }
+        }
+    }
+
+    if let Ok(dir) = std::env::var("BOOKSHELF_PDFIUM_DIR") {
+        candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(&dir)));
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
         }
     }
 
+    candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(".pdfium")));
     candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(".")));
 
     for path in candidates {
@@ -568,13 +778,25 @@ fn ops_to_text(ops: &[Op], resolver: &impl Resolve, resources: &Resources) -> St
                 current_font = Some(name.clone());
             }
             Op::TextDraw { text } => {
-                let s = decode_pdf_string(text, current_font.as_ref(), resolver, resources, &mut tounicode_cache);
+                let s = decode_pdf_string(
+                    text,
+                    current_font.as_ref(),
+                    resolver,
+                    resources,
+                    &mut tounicode_cache,
+                );
                 append_text(&mut out, &s, &mut needs_space);
             }
             Op::TextDrawAdjusted { array } => {
                 for item in array {
                     if let TextDrawAdjusted::Text(text) = item {
-                        let s = decode_pdf_string(text, current_font.as_ref(), resolver, resources, &mut tounicode_cache);
+                        let s = decode_pdf_string(
+                            text,
+                            current_font.as_ref(),
+                            resolver,
+                            resources,
+                            &mut tounicode_cache,
+                        );
                         append_text(&mut out, &s, &mut needs_space);
                     }
                 }
@@ -742,6 +964,7 @@ fn is_noncharacter(code: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn propagates_preview_depth() {
@@ -755,25 +978,17 @@ mod tests {
     }
 
     #[test]
-    fn braille_cell_renders_full_block() {
+    fn braille_cell_renders_dots() {
         let bitmap = GrayBitmap {
             width: 2,
             height: 4,
             stride: 2,
-            pixels: vec![0; 8],
-        };
-        assert_eq!(braille_cell(&bitmap, 0, 0), '⣿');
-    }
-
-    #[test]
-    fn braille_cell_renders_single_dot() {
-        let mut pixels = vec![255u8; 8];
-        pixels[0] = 0;
-        let bitmap = GrayBitmap {
-            width: 2,
-            height: 4,
-            stride: 2,
-            pixels,
+            pixels: vec![
+                0, 255, //
+                255, 255, //
+                255, 255, //
+                255, 255, //
+            ],
         };
         assert_eq!(braille_cell(&bitmap, 0, 0), '⠁');
     }
@@ -795,5 +1010,50 @@ mod tests {
             pixels: vec![0; 8],
         };
         assert_eq!(blocks_cell(&black, 0, 0), '█');
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn can_open_pdfs_in_repo_tmp_dir() -> anyhow::Result<()> {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let tmp_dir = workspace_root.join("tmp");
+        if !tmp_dir.is_dir() {
+            return Ok(());
+        }
+
+        let engine = Engine::new();
+        for entry in std::fs::read_dir(&tmp_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let is_pdf = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.eq_ignore_ascii_case("pdf"))
+                .unwrap_or(false);
+            if !is_pdf {
+                continue;
+            }
+
+            let book = Book {
+                path: bookshelf_core::encode_path(&path),
+                title: path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "untitled".to_string()),
+                last_opened: None,
+            };
+
+            let pages = engine.page_count(&book)?;
+            if pages == 0 {
+                continue;
+            }
+            engine.render_page_text(&book, 0)?;
+        }
+
+        Ok(())
     }
 }

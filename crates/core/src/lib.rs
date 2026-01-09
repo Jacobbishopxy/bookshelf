@@ -1,9 +1,96 @@
 //! Core domain types for Bookshelf.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BookId(pub String);
+
+const UTF8_PATH_PREFIX: &str = "utf8:";
+const BYTES_PATH_PREFIX: &str = "osbytes:";
+
+pub fn encode_path(path: &Path) -> String {
+    match path.to_str() {
+        Some(s) => {
+            if s.starts_with(UTF8_PATH_PREFIX) || s.starts_with(BYTES_PATH_PREFIX) {
+                format!("{UTF8_PATH_PREFIX}{s}")
+            } else {
+                s.to_string()
+            }
+        }
+        None => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt as _;
+                let bytes = path.as_os_str().as_bytes();
+                format!("{BYTES_PATH_PREFIX}{}", hex_encode(bytes))
+            }
+            #[cfg(not(unix))]
+            {
+                path.to_string_lossy().to_string()
+            }
+        }
+    }
+}
+
+pub fn decode_path(encoded: &str) -> PathBuf {
+    if let Some(rest) = encoded.strip_prefix(UTF8_PATH_PREFIX) {
+        return PathBuf::from(rest);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        if let Some(hex) = encoded.strip_prefix(BYTES_PATH_PREFIX) {
+            if let Some(bytes) = hex_decode(hex) {
+                return PathBuf::from(OsString::from_vec(bytes));
+            }
+        }
+    }
+
+    PathBuf::from(encoded)
+}
+
+pub fn display_path(encoded: &str) -> String {
+    decode_path(encoded).display().to_string()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = hex.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = val(pair[0])?;
+        let lo = val(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -135,6 +222,27 @@ impl Settings {
 pub struct Book {
     pub path: String,
     pub title: String,
+    pub last_opened: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bookmark {
+    pub page: u32,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub page: u32,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TocItem {
+    pub title: String,
+    pub page: Option<u32>,
+    pub depth: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +269,20 @@ mod tests {
     fn default_settings_use_preview_depth() {
         let settings = Settings::default();
         assert!(settings.preview_depth > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_roundtrip_through_encoding() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let original = OsString::from_vec(vec![b'a', 0xa1, 0xaf, b'b']);
+        let original_path = PathBuf::from(original.clone());
+        let encoded = encode_path(&original_path);
+        let decoded = decode_path(&encoded);
+        assert_eq!(decoded.as_os_str().as_bytes(), original.as_bytes());
     }
 
     #[test]

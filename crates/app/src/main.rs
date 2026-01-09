@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{Book, ScanScope, Settings};
+use bookshelf_core::{encode_path, Book, ScanScope, Settings};
 use bookshelf_storage::Storage;
 use bookshelf_ui::{Ui, UiExit};
 use directories::ProjectDirs;
@@ -38,10 +38,14 @@ fn run() -> anyhow::Result<()> {
     sync_library(&storage, &settings, &cwd)?;
     let books = storage.list_books()?;
     let progress_by_path = storage.list_progress()?;
+    let bookmarks_by_path = storage.list_bookmarks_by_path()?;
+    let notes_by_path = storage.list_notes_by_path()?;
 
     let mut ctx = AppContext::new(settings)
         .with_library(cwd_str, books)
-        .with_progress(progress_by_path);
+        .with_progress(progress_by_path)
+        .with_bookmarks(bookmarks_by_path)
+        .with_notes(notes_by_path);
     loop {
         let mut ui = Ui::new(ctx);
         let outcome = ui.run()?;
@@ -50,6 +54,20 @@ fn run() -> anyhow::Result<()> {
         for (path, last_page) in ctx.progress_by_path.iter() {
             storage.set_progress(path, *last_page)?;
         }
+        for (path, opened_at) in ctx.opened_at_by_path.iter() {
+            storage.set_last_opened(path, *opened_at)?;
+        }
+        ctx.opened_at_by_path.clear();
+        let dirty_bookmark_paths = std::mem::take(&mut ctx.dirty_bookmark_paths);
+        for path in dirty_bookmark_paths {
+            let bookmarks = ctx.bookmarks_by_path.get(&path).cloned().unwrap_or_default();
+            storage.replace_bookmarks(&path, &bookmarks)?;
+        }
+        let dirty_note_paths = std::mem::take(&mut ctx.dirty_note_paths);
+        for path in dirty_note_paths {
+            let notes = ctx.notes_by_path.get(&path).cloned().unwrap_or_default();
+            storage.replace_notes(&path, &notes)?;
+        }
 
         match outcome.exit {
             UiExit::Quit => break,
@@ -57,8 +75,14 @@ fn run() -> anyhow::Result<()> {
                 sync_library(&storage, &ctx.settings, &cwd)?;
                 let books = storage.list_books()?;
                 let progress_by_path = storage.list_progress()?;
+                let bookmarks_by_path = storage.list_bookmarks_by_path()?;
+                let notes_by_path = storage.list_notes_by_path()?;
                 let cwd_str = ctx.cwd.clone();
-                ctx = ctx.with_library(cwd_str, books).with_progress(progress_by_path);
+                ctx = ctx
+                    .with_library(cwd_str, books)
+                    .with_progress(progress_by_path)
+                    .with_bookmarks(bookmarks_by_path)
+                    .with_notes(notes_by_path);
             }
         }
     }
@@ -152,18 +176,18 @@ fn add_book(out: &mut std::collections::BTreeMap<String, Book>, path: &Path) -> 
         Ok(p) => p,
         Err(_) => path.to_path_buf(),
     };
-    let path_str = normalized.to_string_lossy().to_string();
+    let path_str = encode_path(&normalized);
     let title = normalized
         .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("untitled")
-        .to_string();
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "untitled".to_string());
 
     out.insert(
         path_str.clone(),
         Book {
             path: path_str,
             title,
+            last_opened: None,
         },
     );
     Ok(())

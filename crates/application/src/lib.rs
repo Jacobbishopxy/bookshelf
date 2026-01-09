@@ -1,8 +1,9 @@
 //! Application orchestration layer for Bookshelf.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
-use bookshelf_core::{Book, Progress, Settings};
+use bookshelf_core::{Book, Bookmark, Note, Progress, Settings};
 
 #[derive(Debug, Clone)]
 pub struct AppContext {
@@ -11,6 +12,11 @@ pub struct AppContext {
     pub books: Vec<Book>,
     pub selected: usize,
     pub progress_by_path: HashMap<String, u32>,
+    pub opened_at_by_path: HashMap<String, i64>,
+    pub bookmarks_by_path: HashMap<String, Vec<Bookmark>>,
+    pub notes_by_path: HashMap<String, Vec<Note>>,
+    pub dirty_bookmark_paths: HashSet<String>,
+    pub dirty_note_paths: HashSet<String>,
 }
 
 impl AppContext {
@@ -21,6 +27,11 @@ impl AppContext {
             books: Vec::new(),
             selected: 0,
             progress_by_path: HashMap::new(),
+            opened_at_by_path: HashMap::new(),
+            bookmarks_by_path: HashMap::new(),
+            notes_by_path: HashMap::new(),
+            dirty_bookmark_paths: HashSet::new(),
+            dirty_note_paths: HashSet::new(),
         }
     }
 
@@ -33,6 +44,16 @@ impl AppContext {
 
     pub fn with_progress(mut self, progress_by_path: HashMap<String, u32>) -> Self {
         self.progress_by_path = progress_by_path;
+        self
+    }
+
+    pub fn with_bookmarks(mut self, bookmarks_by_path: HashMap<String, Vec<Bookmark>>) -> Self {
+        self.bookmarks_by_path = bookmarks_by_path;
+        self
+    }
+
+    pub fn with_notes(mut self, notes_by_path: HashMap<String, Vec<Note>>) -> Self {
+        self.notes_by_path = notes_by_path;
         self
     }
 }
