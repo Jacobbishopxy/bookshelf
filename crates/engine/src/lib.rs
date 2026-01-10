@@ -4,7 +4,9 @@ use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
+use anyhow::Context as _;
 use bookshelf_core::{Book, PreviewMode, Settings, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
@@ -15,6 +17,9 @@ use pdf::object::{
 };
 use pdf::primitive::{Name, PdfString, Primitive};
 use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
+
+mod pdfium_worker;
+pub use pdfium_worker::run_pdfium_worker_from_env;
 
 #[derive(Debug, Default)]
 pub struct Engine {
@@ -385,7 +390,14 @@ impl Engine {
                             "(pdfium not available; set Preview mode to text to hide this)\n\n{fallback}"
                         ))
                     }
-                    Err(err) => Err(err),
+                    Err(err) => {
+                        let fallback = self
+                            .render_page_text(book, page_index)
+                            .unwrap_or_else(|_| "no text found".to_string());
+                        Ok(format!(
+                            "(pdfium render failed; showing text)\n(error: {err})\n\n{fallback}"
+                        ))
+                    }
                 }
             }
         }
@@ -408,6 +420,30 @@ impl Engine {
     }
 
     fn render_page_raster(
+        &self,
+        book: &Book,
+        page_index: u32,
+        mode: PreviewMode,
+        width_chars: u16,
+        max_height_chars: u16,
+    ) -> anyhow::Result<String> {
+        if self.should_isolate_pdfium(mode) {
+            match self.render_page_raster_isolated(
+                book,
+                page_index,
+                mode,
+                width_chars,
+                max_height_chars,
+            ) {
+                Ok(text) => return Ok(text),
+                Err(err) => return Err(err),
+            }
+        }
+
+        self.render_page_raster_in_process(book, page_index, mode, width_chars, max_height_chars)
+    }
+
+    fn render_page_raster_in_process(
         &self,
         book: &Book,
         page_index: u32,
@@ -459,6 +495,95 @@ impl Engine {
         }
 
         Ok(out)
+    }
+
+    fn should_isolate_pdfium(&self, mode: PreviewMode) -> bool {
+        const PDFIUM_ISOLATE_ENV: &str = "BOOKSHELF_PDFIUM_ISOLATE";
+        const PDFIUM_WORKER_ENV: &str = "BOOKSHELF_PDFIUM_WORKER";
+        const PDFIUM_WORKER_EXE_ENV: &str = "BOOKSHELF_PDFIUM_WORKER_EXE";
+
+        if matches!(mode, PreviewMode::Text) {
+            return false;
+        }
+
+        if self.pdfium_disabled() {
+            return false;
+        }
+
+        if std::env::var_os(PDFIUM_WORKER_ENV).is_some() {
+            return false;
+        }
+
+        let isolate = std::env::var(PDFIUM_ISOLATE_ENV)
+            .map(|v| !v.trim().is_empty() && v.trim() != "0")
+            .unwrap_or(true);
+        if !isolate {
+            return false;
+        }
+
+        std::env::var_os(PDFIUM_WORKER_EXE_ENV).is_some()
+    }
+
+    fn render_page_raster_isolated(
+        &self,
+        book: &Book,
+        page_index: u32,
+        mode: PreviewMode,
+        width_chars: u16,
+        max_height_chars: u16,
+    ) -> anyhow::Result<String> {
+        const PDFIUM_ISOLATE_ENV: &str = "BOOKSHELF_PDFIUM_ISOLATE";
+        const PDFIUM_WORKER_ENV: &str = "BOOKSHELF_PDFIUM_WORKER";
+        const PDFIUM_WORKER_EXE_ENV: &str = "BOOKSHELF_PDFIUM_WORKER_EXE";
+
+        let exe = std::env::var_os(PDFIUM_WORKER_EXE_ENV)
+            .ok_or_else(|| anyhow::anyhow!("{PDFIUM_WORKER_EXE_ENV} not set"))?;
+
+        let mode_str = match mode {
+            PreviewMode::Braille => "braille",
+            PreviewMode::Blocks => "blocks",
+            PreviewMode::Text => anyhow::bail!("text mode does not use raster rendering"),
+        };
+
+        let pdf_path = bookshelf_core::decode_path(&book.path);
+
+        let output = Command::new(exe)
+            .arg("--pdfium-worker")
+            .arg("--pdf")
+            .arg(pdf_path.as_os_str())
+            .arg("--page-index")
+            .arg(page_index.to_string())
+            .arg("--mode")
+            .arg(mode_str)
+            .arg("--width-chars")
+            .arg(width_chars.to_string())
+            .arg("--max-height-chars")
+            .arg(max_height_chars.to_string())
+            .env(PDFIUM_WORKER_ENV, "1")
+            .env(PDFIUM_ISOLATE_ENV, "0")
+            .output()
+            .with_context(|| "spawn pdfium worker")?;
+
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            if let Some(signal) = output.status.signal() {
+                anyhow::bail!(
+                    "pdfium worker terminated by signal {signal}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        anyhow::bail!(
+            "pdfium worker failed: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
     }
 
     fn render_page_bitmap_gray(
