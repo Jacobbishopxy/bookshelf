@@ -417,6 +417,7 @@ impl Ui {
     fn open_toc_panel(&mut self) {
         self.toc_panel.open = true;
         self.toc_panel.error = None;
+        self.toc_panel.query.clear();
         self.goto_panel.open = false;
         self.bookmarks_panel.open = false;
         self.notes_panel.open = false;
@@ -452,10 +453,32 @@ impl Ui {
                 best = idx;
             }
         }
-        self.toc_panel.selected = best;
+        let visible = self.toc_visible_indices();
+        self.toc_panel.selected = visible.iter().position(|idx| *idx == best).unwrap_or(0);
+    }
+
+    fn toc_visible_indices(&self) -> Vec<usize> {
+        let query = self.toc_panel.query.trim().to_lowercase();
+        if query.is_empty() {
+            return (0..self.toc_panel.items.len()).collect();
+        }
+
+        self.toc_panel
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, item)| {
+                if item.title.to_lowercase().contains(&query) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     fn handle_toc_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        let visible = self.toc_visible_indices();
         match key.code {
             KeyCode::Esc => {
                 self.toc_panel.open = false;
@@ -466,14 +489,17 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Down => {
-                let len = self.toc_panel.items.len();
+                let len = visible.len();
                 if len > 0 {
                     self.toc_panel.selected = (self.toc_panel.selected + 1).min(len - 1);
                 }
                 Ok(None)
             }
             KeyCode::Enter => {
-                let Some(item) = self.toc_panel.items.get(self.toc_panel.selected) else {
+                let Some(item_idx) = visible.get(self.toc_panel.selected).copied() else {
+                    return Ok(None);
+                };
+                let Some(item) = self.toc_panel.items.get(item_idx) else {
                     return Ok(None);
                 };
                 let Some(page) = item.page else {
@@ -483,6 +509,23 @@ impl Ui {
                 self.reader.page = page.saturating_sub(1);
                 self.reader.invalidate_render();
                 self.toc_panel.open = false;
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                self.toc_panel.query.pop();
+                self.toc_panel.selected = 0;
+                Ok(None)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.toc_panel.query.clear();
+                self.toc_panel.selected = 0;
+                Ok(None)
+            }
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    self.toc_panel.query.push(ch);
+                    self.toc_panel.selected = 0;
+                }
                 Ok(None)
             }
             _ => Ok(None),
@@ -1277,9 +1320,21 @@ impl Ui {
         let popup_area = centered_rect(80, 70, area);
         frame.render_widget(Clear, popup_area);
 
+        let visible = self.toc_visible_indices();
+
         let title = match self.toc_panel.error.as_deref() {
             Some(_) => "Table of Contents (error)".to_string(),
-            None => format!("Table of Contents — {}", self.toc_panel.items.len()),
+            None => {
+                if self.toc_panel.query.trim().is_empty() {
+                    format!("Table of Contents — {}", self.toc_panel.items.len())
+                } else {
+                    format!(
+                        "Table of Contents — {}/{}",
+                        visible.len(),
+                        self.toc_panel.items.len()
+                    )
+                }
+            }
         };
         let block = Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -1299,6 +1354,10 @@ impl Ui {
 
         let mut header_lines = Vec::new();
         header_lines.push(Line::raw("↑/↓ select, Enter jump, Esc close."));
+        header_lines.push(Line::from(vec![
+            Span::styled("Filter: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(self.toc_panel.query.clone()),
+        ]));
         if let Some(err) = &self.toc_panel.error {
             header_lines.push(Line::from(vec![Span::styled(
                 err.clone(),
@@ -1312,10 +1371,12 @@ impl Ui {
 
         let items: Vec<ListItem> = if self.toc_panel.items.is_empty() {
             vec![ListItem::new(Line::raw("(no outline found)"))]
+        } else if !self.toc_panel.query.trim().is_empty() && visible.is_empty() {
+            vec![ListItem::new(Line::raw("(no matches)"))]
         } else {
-            self.toc_panel
-                .items
+            visible
                 .iter()
+                .filter_map(|idx| self.toc_panel.items.get(*idx))
                 .map(|item| {
                     let indent = "  ".repeat(item.depth.min(12));
                     let page = item
@@ -1339,10 +1400,8 @@ impl Ui {
             .highlight_spacing(HighlightSpacing::Always);
 
         let mut state = ListState::default();
-        if !self.toc_panel.items.is_empty() {
-            state.select(Some(
-                self.toc_panel.selected.min(self.toc_panel.items.len() - 1),
-            ));
+        if !visible.is_empty() {
+            state.select(Some(self.toc_panel.selected.min(visible.len() - 1)));
         }
         frame.render_stateful_widget(list, sections[1], &mut state);
 
@@ -1350,7 +1409,9 @@ impl Ui {
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" close  "),
             Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" jump"),
+            Span::raw(" jump  "),
+            Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" clear"),
         ]))
         .alignment(Alignment::Center);
         frame.render_widget(footer, sections[2]);
@@ -2015,6 +2076,7 @@ struct BookmarksPanel {
 struct TocPanel {
     open: bool,
     selected: usize,
+    query: String,
     path: Option<String>,
     items: Vec<TocItem>,
     error: Option<String>,
