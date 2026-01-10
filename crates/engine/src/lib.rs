@@ -55,6 +55,14 @@ impl Engine {
                 Err(err) => format!("(error reading pdf: {err})"),
             },
             PreviewMode::Braille | PreviewMode::Blocks => {
+                if self.pdfium_disabled() {
+                    return match self.render_text_preview(book, settings) {
+                        Ok(text) => format!(
+                            "(pdfium disabled via BOOKSHELF_DISABLE_PDFIUM; showing text preview)\n\n{text}"
+                        ),
+                        Err(err) => format!("(error reading pdf: {err})"),
+                    };
+                }
                 match self.render_page_thumbnail(
                     book,
                     0,
@@ -356,6 +364,14 @@ impl Engine {
         match mode {
             PreviewMode::Text => self.render_page_text(book, page_index),
             PreviewMode::Braille | PreviewMode::Blocks => {
+                if self.pdfium_disabled() {
+                    let fallback = self
+                        .render_page_text(book, page_index)
+                        .unwrap_or_else(|_| "no text found".to_string());
+                    return Ok(format!(
+                        "(pdfium disabled via BOOKSHELF_DISABLE_PDFIUM; set Preview mode to text to hide this)\n\n{fallback}"
+                    ));
+                }
                 let viewport_height_chars = viewport_height_chars.max(1);
                 let max_height_chars = viewport_height_chars.saturating_mul(12);
                 match self.render_page_raster(
@@ -474,7 +490,10 @@ impl Engine {
             .set_target_width(target_width.max(1))
             .set_maximum_width(target_width.max(1))
             .set_maximum_height(max_height.max(1))
+            .render_form_data(false)
+            .render_annotations(false)
             .use_grayscale_rendering(true)
+            .set_reverse_byte_order(false)
             .set_format(PdfBitmapFormat::Gray);
 
         let bitmap = page
@@ -536,6 +555,12 @@ impl Engine {
 
     fn pdfium_unavailable(&self) -> bool {
         matches!(&*self.pdfium.borrow(), PdfiumState::Unavailable(_))
+    }
+
+    fn pdfium_disabled(&self) -> bool {
+        std::env::var("BOOKSHELF_DISABLE_PDFIUM")
+            .map(|v| !v.trim().is_empty() && v.trim() != "0")
+            .unwrap_or(false)
     }
 
     fn render_text_preview(&self, book: &Book, settings: &Settings) -> anyhow::Result<String> {

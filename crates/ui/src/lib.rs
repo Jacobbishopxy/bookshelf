@@ -80,9 +80,20 @@ impl Ui {
 
     pub fn run(&mut self) -> anyhow::Result<UiOutcome> {
         let mut terminal = setup_terminal()?;
-        let result = self.event_loop(&mut terminal);
-        restore_terminal(&mut terminal)?;
-        result
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.event_loop(&mut terminal)
+        }));
+        let restore_result = restore_terminal(&mut terminal);
+
+        match (result, restore_result) {
+            (Ok(res), Ok(())) => res,
+            (Ok(_), Err(err)) => Err(err),
+            (Err(panic), Ok(())) => Err(anyhow::anyhow!(panic_to_string(panic))),
+            (Err(panic), Err(err)) => Err(anyhow::anyhow!(
+                "{}\n(additionally failed to restore terminal: {err})",
+                panic_to_string(panic)
+            )),
+        }
     }
 
     fn event_loop(
@@ -2069,6 +2080,16 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)
         .context("leave alt screen")?;
     Ok(())
+}
+
+fn panic_to_string(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = panic.downcast_ref::<&str>() {
+        format!("panic: {s}")
+    } else if let Some(s) = panic.downcast_ref::<String>() {
+        format!("panic: {s}")
+    } else {
+        "panic: (unknown payload)".to_string()
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
