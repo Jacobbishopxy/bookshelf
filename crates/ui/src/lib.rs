@@ -43,6 +43,7 @@ pub struct Ui {
     preview_panel: PreviewPanel,
     scan_panel: ScanPathPanel,
     search_panel: SearchPanel,
+    goto_panel: GotoPanel,
     bookmarks_panel: BookmarksPanel,
     notes_panel: NotesPanel,
     toc_panel: TocPanel,
@@ -58,6 +59,7 @@ impl Ui {
         let preview_panel = PreviewPanel::new(ctx.settings.clone());
         let scan_panel = ScanPathPanel::new(join_roots(&ctx.settings));
         let search_panel = SearchPanel::default();
+        let goto_panel = GotoPanel::default();
         let bookmarks_panel = BookmarksPanel::default();
         let notes_panel = NotesPanel::default();
         let toc_panel = TocPanel::default();
@@ -69,6 +71,7 @@ impl Ui {
             preview_panel,
             scan_panel,
             search_panel,
+            goto_panel,
             bookmarks_panel,
             notes_panel,
             toc_panel,
@@ -128,6 +131,13 @@ impl Ui {
                     }
                 } else if self.reader.open && self.bookmarks_panel.open {
                     if let Some(exit) = self.handle_bookmarks_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.reader.open && self.goto_panel.open {
+                    if let Some(exit) = self.handle_goto_panel_key(key)? {
                         return Ok(UiOutcome {
                             ctx: self.ctx.clone(),
                             exit,
@@ -276,9 +286,19 @@ impl Ui {
                         .insert(path, self.reader.page.saturating_add(1));
                 }
                 self.reader = ReaderPanel::default();
+                self.goto_panel = GotoPanel::default();
                 self.bookmarks_panel = BookmarksPanel::default();
                 self.notes_panel = NotesPanel::default();
                 self.toc_panel = TocPanel::default();
+                Ok(None)
+            }
+            KeyCode::Char('g') => {
+                self.goto_panel.open = true;
+                self.goto_panel.error = None;
+                self.goto_panel.input = self.reader.page.saturating_add(1).to_string();
+                self.bookmarks_panel.open = false;
+                self.notes_panel.open = false;
+                self.toc_panel.open = false;
                 Ok(None)
             }
             KeyCode::Char('d') => {
@@ -303,6 +323,7 @@ impl Ui {
             KeyCode::Char('b') => {
                 self.bookmarks_panel.open = true;
                 self.bookmarks_panel.selected = 0;
+                self.goto_panel.open = false;
                 self.notes_panel.open = false;
                 self.toc_panel.open = false;
                 Ok(None)
@@ -311,6 +332,7 @@ impl Ui {
                 self.notes_panel.open = true;
                 self.notes_panel.selected = 0;
                 self.notes_panel.error = None;
+                self.goto_panel.open = false;
                 self.bookmarks_panel.open = false;
                 self.toc_panel.open = false;
                 Ok(None)
@@ -339,9 +361,63 @@ impl Ui {
         }
     }
 
+    fn handle_goto_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        match key.code {
+            KeyCode::Esc => {
+                self.goto_panel.open = false;
+                self.goto_panel.input.clear();
+                self.goto_panel.error = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let input = self.goto_panel.input.trim();
+                if input.is_empty() {
+                    self.goto_panel.error = Some("Enter a page number".to_string());
+                    return Ok(None);
+                }
+
+                let page = match input.parse::<u32>() {
+                    Ok(p) if p >= 1 => p,
+                    _ => {
+                        self.goto_panel.error = Some("Invalid page number".to_string());
+                        return Ok(None);
+                    }
+                };
+
+                if let Some(total) = self.reader.total_pages
+                    && page > total
+                {
+                    self.goto_panel.error = Some(format!("Page out of range (1..={total})"));
+                    return Ok(None);
+                }
+
+                self.reader.page = page.saturating_sub(1);
+                self.reader.invalidate_render();
+                self.reader.notice = Some(format!("jumped to page {page}"));
+                self.goto_panel.open = false;
+                self.goto_panel.error = None;
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                self.goto_panel.input.pop();
+                Ok(None)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.goto_panel.input.clear();
+                Ok(None)
+            }
+            KeyCode::Char(ch) if ch.is_ascii_digit() => {
+                self.goto_panel.input.push(ch);
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn open_toc_panel(&mut self) {
         self.toc_panel.open = true;
         self.toc_panel.error = None;
+        self.goto_panel.open = false;
         self.bookmarks_panel.open = false;
         self.notes_panel.open = false;
 
@@ -1341,6 +1417,8 @@ impl Ui {
             Span::raw(" page  "),
             Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" scroll  "),
+            Span::styled("g", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" goto  "),
             Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" toc  "),
             Span::styled("b", Style::default().add_modifier(Modifier::BOLD)),
@@ -1369,12 +1447,54 @@ impl Ui {
         if self.bookmarks_panel.open {
             self.draw_bookmarks_panel(area, frame);
         }
+        if self.goto_panel.open {
+            self.draw_goto_panel(area, frame);
+        }
         if self.toc_panel.open {
             self.draw_toc_panel(area, frame);
         }
         if self.notes_panel.open {
             self.draw_notes_panel(area, frame);
         }
+    }
+
+    fn draw_goto_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(48, 28, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = match self.reader.total_pages {
+            Some(total) => format!("Go to page (1..={total})"),
+            None => "Go to page".to_string(),
+        };
+
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("Page: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(self.goto_panel.input.clone()),
+            ]),
+            Line::raw(""),
+            Line::raw("Enter jumps, Esc cancels, Ctrl+u clears."),
+        ];
+
+        if let Some(err) = &self.goto_panel.error {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                err.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(paragraph, inner);
     }
 
     fn draw_settings_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -1876,6 +1996,13 @@ struct SettingsPanel {
 struct SearchPanel {
     open: bool,
     query: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GotoPanel {
+    open: bool,
+    input: String,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
