@@ -21,17 +21,12 @@ pub struct Engine {
     pdfium: RefCell<PdfiumState>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 enum PdfiumState {
+    #[default]
     Uninitialized,
     Available(Pdfium),
     Unavailable(String),
-}
-
-impl Default for PdfiumState {
-    fn default() -> Self {
-        Self::Uninitialized
-    }
 }
 
 impl Engine {
@@ -101,17 +96,17 @@ impl Engine {
         let catalog = file.get_root();
 
         let mut dest_pages_by_name: HashMap<String, PlainRef> = HashMap::new();
-        if let Some(ref names) = catalog.names {
-            if let Some(ref dests) = names.dests {
-                dests.walk(&resolver, &mut |key: &PdfString, val: &Option<Dest>| {
-                    if let Some(Dest {
-                        page: Some(page), ..
-                    }) = val
-                    {
-                        dest_pages_by_name.insert(key.to_string_lossy(), page.get_inner());
-                    }
-                })?;
-            }
+        if let Some(ref names) = catalog.names
+            && let Some(ref dests) = names.dests
+        {
+            dests.walk(&resolver, &mut |key: &PdfString, val: &Option<Dest>| {
+                if let Some(Dest {
+                    page: Some(page), ..
+                }) = val
+                {
+                    dest_pages_by_name.insert(key.to_string_lossy(), page.get_inner());
+                }
+            })?;
         }
 
         let mut pages_by_ref: HashMap<PlainRef, usize> = HashMap::new();
@@ -183,33 +178,33 @@ impl Engine {
                     }
                 }
 
-                if page.is_none() {
-                    if let Some(Action::Goto(dest)) = node.action.clone() {
-                        match dest {
-                            MaybeNamedDest::Named(s) => {
-                                page = page_for_name(&s.to_string_lossy());
-                            }
-                            MaybeNamedDest::Direct(Dest { page: Some(p), .. }) => {
-                                page = page_for_ref(p.get_inner());
-                            }
-                            _ => {}
+                if page.is_none()
+                    && let Some(Action::Goto(dest)) = node.action.clone()
+                {
+                    match dest {
+                        MaybeNamedDest::Named(s) => {
+                            page = page_for_name(&s.to_string_lossy());
                         }
+                        MaybeNamedDest::Direct(Dest { page: Some(p), .. }) => {
+                            page = page_for_ref(p.get_inner());
+                        }
+                        _ => {}
                     }
                 }
 
                 out.push(TocItem { title, page, depth });
 
-                if let Some(entry_ref) = node.first {
-                    if let Ok(entry) = r.get(entry_ref) {
-                        walk_outline(r, entry, depth + 1, page_for_name, page_for_ref, out);
-                    }
+                if let Some(entry_ref) = node.first
+                    && let Ok(entry) = r.get(entry_ref)
+                {
+                    walk_outline(r, entry, depth + 1, page_for_name, page_for_ref, out);
                 }
 
-                if let Some(entry_ref) = node.next {
-                    if let Ok(entry) = r.get(entry_ref) {
-                        node = entry;
-                        continue;
-                    }
+                if let Some(entry_ref) = node.next
+                    && let Ok(entry) = r.get(entry_ref)
+                {
+                    node = entry;
+                    continue;
                 }
 
                 break;
@@ -217,11 +212,11 @@ impl Engine {
         }
 
         let mut out = Vec::new();
-        if let Some(ref outlines) = catalog.outlines {
-            if let Some(entry_ref) = outlines.first {
-                let entry = resolver.get(entry_ref)?;
-                walk_outline(&resolver, entry, 0, &page_for_name, &page_for_ref, &mut out);
-            }
+        if let Some(ref outlines) = catalog.outlines
+            && let Some(entry_ref) = outlines.first
+        {
+            let entry = resolver.get(entry_ref)?;
+            walk_outline(&resolver, entry, 0, &page_for_name, &page_for_ref, &mut out);
         }
         Ok(out)
     }
@@ -570,7 +565,7 @@ impl Engine {
 
         let mut out = String::new();
         let mut any_text = false;
-        let max_pages = settings.preview_pages.max(1) as usize;
+        let max_pages = settings.preview_pages.max(1);
         let max_lines = settings.preview_depth.max(1);
 
         for (idx, page_res) in file.pages().take(max_pages).enumerate() {
@@ -640,7 +635,7 @@ fn div_ceil(value: usize, divisor: usize) -> usize {
     if divisor == 0 {
         return 0;
     }
-    (value + divisor - 1) / divisor
+    value.div_ceil(divisor)
 }
 
 fn braille_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
@@ -712,24 +707,28 @@ fn bind_pdfium() -> anyhow::Result<Pdfium> {
 
     if let Some(path) = option_env!("BOOKSHELF_PDFIUM_LIB_PATH") {
         let path = PathBuf::from(path);
-        if path.is_file() {
-            if let Ok(bindings) = Pdfium::bind_to_library(&path) {
-                return Ok(Pdfium::new(bindings));
-            }
+        if path.is_file()
+            && let Ok(bindings) = Pdfium::bind_to_library(&path)
+        {
+            return Ok(Pdfium::new(bindings));
         }
     }
 
     if let Ok(dir) = std::env::var("BOOKSHELF_PDFIUM_DIR") {
-        candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(&dir)));
+        candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(
+            &dir,
+        )));
     }
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
     }
 
-    candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(".pdfium")));
+    candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(
+        ".pdfium",
+    )));
     candidates.push(Pdfium::pdfium_platform_library_name_at_path(Path::new(".")));
 
     for path in candidates {
@@ -898,7 +897,7 @@ fn decode_with_tounicode(bytes: &[u8], map: &ToUnicodeMap) -> Option<String> {
     let (s1, m1, t1) = decode_bytes(bytes, 1, map);
     let mut best = (s1, m1, t1);
 
-    if bytes.len() % 2 == 0 {
+    if bytes.len().is_multiple_of(2) {
         let (s2, m2, t2) = decode_bytes(bytes, 2, map);
         if m2 > best.1 || (m2 == best.1 && s2.len() > best.0.len()) {
             best = (s2, m2, t2);

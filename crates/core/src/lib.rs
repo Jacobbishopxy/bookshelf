@@ -44,10 +44,10 @@ pub fn decode_path(encoded: &str) -> PathBuf {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt as _;
 
-        if let Some(hex) = encoded.strip_prefix(BYTES_PATH_PREFIX) {
-            if let Some(bytes) = hex_decode(hex) {
-                return PathBuf::from(OsString::from_vec(bytes));
-            }
+        if let Some(hex) = encoded.strip_prefix(BYTES_PATH_PREFIX)
+            && let Some(bytes) = hex_decode(hex)
+        {
+            return PathBuf::from(OsString::from_vec(bytes));
         }
     }
 
@@ -79,7 +79,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     }
 
     let bytes = hex.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return None;
     }
 
@@ -328,12 +328,20 @@ mod tests {
             preview_depth: 0,
             scan_scope: ScanScope::Direct,
             preview_pages: 0,
-            library_roots: vec![" ".to_string(), "/a".to_string(), "/a".to_string(), " /b ".to_string()],
+            library_roots: vec![
+                " ".to_string(),
+                "/a".to_string(),
+                "/a".to_string(),
+                " /b ".to_string(),
+            ],
         };
         settings.normalize();
         assert_eq!(settings.preview_depth, 1);
         assert_eq!(settings.preview_pages, 1);
-        assert_eq!(settings.library_roots, vec!["/a".to_string(), "/b".to_string()]);
+        assert_eq!(
+            settings.library_roots,
+            vec!["/a".to_string(), "/b".to_string()]
+        );
     }
 
     #[test]

@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn tracker_uses_progress() {
-        let tracker = ProgressTracker::default();
+        let tracker = ProgressTracker;
         let progress = Progress {
             current_page: 1,
             total_pages: 4,

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{encode_path, Book, ScanScope, Settings};
+use bookshelf_core::{Book, ScanScope, Settings, encode_path};
 use bookshelf_storage::Storage;
 use bookshelf_ui::{Ui, UiExit};
 use directories::ProjectDirs;
@@ -60,7 +60,11 @@ fn run() -> anyhow::Result<()> {
         ctx.opened_at_by_path.clear();
         let dirty_bookmark_paths = std::mem::take(&mut ctx.dirty_bookmark_paths);
         for path in dirty_bookmark_paths {
-            let bookmarks = ctx.bookmarks_by_path.get(&path).cloned().unwrap_or_default();
+            let bookmarks = ctx
+                .bookmarks_by_path
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
             storage.replace_bookmarks(&path, &bookmarks)?;
         }
         let dirty_note_paths = std::mem::take(&mut ctx.dirty_note_paths);
@@ -145,8 +149,8 @@ fn scan_pdfs(settings: &Settings, cwd: &Path) -> anyhow::Result<Vec<Book>> {
             ScanScope::Recursive => {
                 let mut stack = vec![root_path];
                 while let Some(dir) = stack.pop() {
-                    for entry in fs::read_dir(&dir)
-                        .with_context(|| format!("read dir {}", dir.display()))?
+                    for entry in
+                        fs::read_dir(&dir).with_context(|| format!("read dir {}", dir.display()))?
                     {
                         let entry = entry?;
                         let path = entry.path();

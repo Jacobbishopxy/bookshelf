@@ -38,7 +38,10 @@ Fix:\n\
             );
         });
 
-    println!("cargo:rustc-env=BOOKSHELF_PDFIUM_LIB_PATH={}", lib.display());
+    println!(
+        "cargo:rustc-env=BOOKSHELF_PDFIUM_LIB_PATH={}",
+        lib.display()
+    );
     println!("cargo:rerun-if-changed={}", lib.display());
 }
 

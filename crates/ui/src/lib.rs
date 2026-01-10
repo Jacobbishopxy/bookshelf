@@ -105,74 +105,74 @@ impl Ui {
         loop {
             terminal.draw(|frame| self.draw(frame.area(), frame))?;
 
-            if event::poll(tick_rate)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
+            if event::poll(tick_rate)?
+                && let Event::Key(key) = event::read()?
+            {
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
 
-                    if self.settings_panel.open {
-                        if let Some(exit) = self.handle_settings_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.search_panel.open {
-                        if let Some(exit) = self.handle_search_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.reader.open && self.bookmarks_panel.open {
-                        if let Some(exit) = self.handle_bookmarks_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.reader.open && self.toc_panel.open {
-                        if let Some(exit) = self.handle_toc_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.reader.open && self.notes_panel.open {
-                        if let Some(exit) = self.handle_notes_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.reader.open {
-                        if let Some(exit) = self.handle_reader_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.scan_panel.open {
-                        if let Some(exit) = self.handle_scan_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.preview_panel.open {
-                        if let Some(exit) = self.handle_preview_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if let Some(exit) = self.handle_main_key(key)? {
+                if self.settings_panel.open {
+                    if let Some(exit) = self.handle_settings_panel_key(key)? {
                         return Ok(UiOutcome {
                             ctx: self.ctx.clone(),
                             exit,
                         });
                     }
+                } else if self.search_panel.open {
+                    if let Some(exit) = self.handle_search_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.reader.open && self.bookmarks_panel.open {
+                    if let Some(exit) = self.handle_bookmarks_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.reader.open && self.toc_panel.open {
+                    if let Some(exit) = self.handle_toc_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.reader.open && self.notes_panel.open {
+                    if let Some(exit) = self.handle_notes_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.reader.open {
+                    if let Some(exit) = self.handle_reader_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.scan_panel.open {
+                    if let Some(exit) = self.handle_scan_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if self.preview_panel.open {
+                    if let Some(exit) = self.handle_preview_panel_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                } else if let Some(exit) = self.handle_main_key(key)? {
+                    return Ok(UiOutcome {
+                        ctx: self.ctx.clone(),
+                        exit,
+                    });
                 }
             }
         }
@@ -370,10 +370,10 @@ impl Ui {
         let current_page = self.reader.page.saturating_add(1);
         let mut best = 0usize;
         for (idx, item) in self.toc_panel.items.iter().enumerate() {
-            if let Some(page) = item.page {
-                if page <= current_page {
-                    best = idx;
-                }
+            if let Some(page) = item.page
+                && page <= current_page
+            {
+                best = idx;
             }
         }
         self.toc_panel.selected = best;
@@ -492,7 +492,7 @@ impl Ui {
 
     fn handle_notes_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
         if self.notes_panel.input_open {
-            return Ok(self.handle_notes_input_key(key)?);
+            return self.handle_notes_input_key(key);
         }
 
         match key.code {
@@ -702,14 +702,11 @@ impl Ui {
     }
 
     fn handle_scan_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('u') => {
-                    self.scan_panel.input.clear();
-                    return Ok(None);
-                }
-                _ => {}
-            }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.scan_panel.input.clear();
+            return Ok(None);
         }
 
         match key.code {
@@ -800,7 +797,7 @@ impl Ui {
             return;
         }
 
-        if !visible.iter().any(|idx| *idx == self.ctx.selected) {
+        if !visible.contains(&self.ctx.selected) {
             self.ctx.selected = visible[0];
         }
     }
@@ -815,7 +812,7 @@ impl Ui {
             .ctx
             .selected
             .min(self.ctx.books.len().saturating_sub(1));
-        if visible.iter().any(|idx| *idx == selected) {
+        if visible.contains(&selected) {
             Some(selected)
         } else {
             Some(visible[0])
@@ -1015,14 +1012,15 @@ impl Ui {
         frame.render_widget(block.clone(), popup_area);
 
         let inner = block.inner(popup_area);
-        let mut lines = Vec::new();
-        lines.push(Line::from(vec![
-            Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(self.search_panel.query.clone()),
-        ]));
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("Type to filter by title or path."));
-        lines.push(Line::raw("Esc closes, Enter opens, Ctrl+u clears."));
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(self.search_panel.query.clone()),
+            ]),
+            Line::raw(""),
+            Line::raw("Type to filter by title or path."),
+            Line::raw("Esc closes, Enter opens, Ctrl+u clears."),
+        ];
 
         let paragraph = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: true })
@@ -1530,7 +1528,10 @@ impl Ui {
                 Span::raw(pages),
             ]));
             lines.push(Line::from(vec![
-                Span::styled("Last opened: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Last opened: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format_last_opened(book.last_opened)),
             ]));
             lines.push(Line::raw(""));
@@ -1883,25 +1884,13 @@ struct BookmarksPanel {
     selected: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct TocPanel {
     open: bool,
     selected: usize,
     path: Option<String>,
     items: Vec<TocItem>,
     error: Option<String>,
-}
-
-impl Default for TocPanel {
-    fn default() -> Self {
-        Self {
-            open: false,
-            selected: 0,
-            path: None,
-            items: Vec::new(),
-            error: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1964,10 +1953,10 @@ impl ReaderPanel {
         let saved = ctx.progress_by_path.get(&book.path).copied().unwrap_or(1);
         self.page = saved.saturating_sub(1);
         self.total_pages = engine.page_count(book).ok();
-        if let Some(total) = self.total_pages {
-            if total > 0 {
-                self.page = self.page.min(total.saturating_sub(1));
-            }
+        if let Some(total) = self.total_pages
+            && total > 0
+        {
+            self.page = self.page.min(total.saturating_sub(1));
         }
         self.invalidate_render();
     }
@@ -2118,7 +2107,7 @@ fn join_roots(settings: &Settings) -> String {
 
 fn parse_roots_input(input: &str) -> Vec<String> {
     input
-        .split(|ch| ch == ';' || ch == ',')
+        .split([';', ','])
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()

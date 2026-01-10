@@ -94,10 +94,10 @@ impl Storage {
             }
         }
 
-        match self
-            .conn
-            .execute("ALTER TABLE settings ADD COLUMN library_roots_json TEXT NOT NULL DEFAULT '[]'", [])
-        {
+        match self.conn.execute(
+            "ALTER TABLE settings ADD COLUMN library_roots_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        ) {
             Ok(_) => {}
             Err(err) => {
                 let msg = err.to_string();
@@ -127,15 +127,26 @@ impl Storage {
             )
             .optional()?;
 
-        let (preview_mode, preview_depth, preview_pages, scan_scope, library_roots_json) = match row {
+        let (preview_mode, preview_depth, preview_pages, scan_scope, library_roots_json) = match row
+        {
             Some(value) => value,
-            None => ("text".to_string(), 5, 2, "recursive".to_string(), "[]".to_string()),
+            None => (
+                "text".to_string(),
+                5,
+                2,
+                "recursive".to_string(),
+                "[]".to_string(),
+            ),
         };
 
-        let preview_mode = preview_mode.parse::<PreviewMode>().unwrap_or(PreviewMode::Text);
+        let preview_mode = preview_mode
+            .parse::<PreviewMode>()
+            .unwrap_or(PreviewMode::Text);
         let preview_depth = usize::try_from(preview_depth).unwrap_or(5);
         let preview_pages = usize::try_from(preview_pages).unwrap_or(2);
-        let scan_scope = scan_scope.parse::<ScanScope>().unwrap_or(ScanScope::Recursive);
+        let scan_scope = scan_scope
+            .parse::<ScanScope>()
+            .unwrap_or(ScanScope::Recursive);
         let library_roots: Vec<String> =
             serde_json::from_str(&library_roots_json).unwrap_or_else(|_| Vec::new());
 
@@ -238,7 +249,9 @@ impl Storage {
         Ok(())
     }
 
-    pub fn list_notes_by_path(&self) -> anyhow::Result<std::collections::HashMap<String, Vec<Note>>> {
+    pub fn list_notes_by_path(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, Vec<Note>>> {
         let mut stmt = self
             .conn
             .prepare("SELECT path, page, body FROM notes ORDER BY path, page, body")?;
@@ -250,7 +263,8 @@ impl Storage {
             Ok((path, Note { page, body }))
         })?;
 
-        let mut out: std::collections::HashMap<String, Vec<Note>> = std::collections::HashMap::new();
+        let mut out: std::collections::HashMap<String, Vec<Note>> =
+            std::collections::HashMap::new();
         for row in rows {
             let (path, note) = row?;
             out.entry(path).or_default().push(note);
