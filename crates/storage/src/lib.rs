@@ -157,23 +157,31 @@ impl Storage {
             )
             .optional()?;
 
-        let (preview_mode, reader_mode, preview_depth, preview_pages, scan_scope, library_roots_json) =
-            match row {
-                Some(value) => value,
-                None => (
-                    "text".to_string(),
-                    "text".to_string(),
-                    5,
-                    2,
-                    "recursive".to_string(),
-                    "[]".to_string(),
-                ),
-            };
+        let (
+            preview_mode,
+            reader_mode,
+            preview_depth,
+            preview_pages,
+            scan_scope,
+            library_roots_json,
+        ) = match row {
+            Some(value) => value,
+            None => (
+                "text".to_string(),
+                "text".to_string(),
+                5,
+                2,
+                "recursive".to_string(),
+                "[]".to_string(),
+            ),
+        };
 
         let preview_mode = preview_mode
             .parse::<PreviewMode>()
             .unwrap_or(PreviewMode::Text);
-        let reader_mode = reader_mode.parse::<ReaderMode>().unwrap_or(ReaderMode::Text);
+        let reader_mode = reader_mode
+            .parse::<ReaderMode>()
+            .unwrap_or(ReaderMode::Text);
         let preview_depth = usize::try_from(preview_depth).unwrap_or(5);
         let preview_pages = usize::try_from(preview_pages).unwrap_or(2);
         let scan_scope = scan_scope

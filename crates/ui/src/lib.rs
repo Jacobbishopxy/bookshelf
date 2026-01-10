@@ -362,11 +362,93 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Up => {
-                self.reader.scroll_up();
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, 0, -3);
+                } else {
+                    self.reader.scroll_up();
+                }
                 Ok(None)
             }
             KeyCode::Down => {
-                self.reader.scroll_down();
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, 0, 3);
+                } else {
+                    self.reader.scroll_down();
+                }
+                Ok(None)
+            }
+            KeyCode::PageUp => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    let step = self
+                        .reader
+                        .render_key
+                        .map(|k| k.height.saturating_sub(2))
+                        .unwrap_or(10);
+                    self.reader
+                        .pan_image_by_cells(&self.image_picker, 0, -i32::from(step));
+                } else {
+                    for _ in 0..10 {
+                        self.reader.scroll_up();
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::PageDown => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    let step = self
+                        .reader
+                        .render_key
+                        .map(|k| k.height.saturating_sub(2))
+                        .unwrap_or(10);
+                    self.reader
+                        .pan_image_by_cells(&self.image_picker, 0, i32::from(step));
+                } else {
+                    for _ in 0..10 {
+                        self.reader.scroll_down();
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Char('h') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, -5, 0);
+                }
+                Ok(None)
+            }
+            KeyCode::Char('j') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, 0, 5);
+                }
+                Ok(None)
+            }
+            KeyCode::Char('k') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, 0, -5);
+                }
+                Ok(None)
+            }
+            KeyCode::Char('l') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.pan_image_by_cells(&self.image_picker, 5, 0);
+                }
+                Ok(None)
+            }
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.zoom_image_in();
+                }
+                Ok(None)
+            }
+            KeyCode::Char('-') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.zoom_image_out();
+                }
+                Ok(None)
+            }
+            KeyCode::Char('0') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Image {
+                    self.reader.reset_image_view();
+                }
                 Ok(None)
             }
             _ => Ok(None),
@@ -1439,15 +1521,24 @@ impl Ui {
             ])
             .split(area);
 
+        let mode_text = match self.ctx.settings.reader_mode {
+            ReaderMode::Text => "text".to_string(),
+            ReaderMode::Image => format!("image {}%", self.reader.image_zoom_percent),
+        };
+
         let title_text = match (&self.reader.book_title, self.reader.total_pages) {
             (Some(title), Some(total)) => format!(
-                "Reader — {}  (page {}/{})",
+                "Reader — {}  (page {}/{})  [{mode_text}]",
                 title,
                 self.reader.page.saturating_add(1),
                 total
             ),
-            (Some(title), None) => format!("Reader — {}  (page {})", title, self.reader.page + 1),
-            _ => "Reader".to_string(),
+            (Some(title), None) => format!(
+                "Reader — {}  (page {})  [{mode_text}]",
+                title,
+                self.reader.page + 1
+            ),
+            _ => format!("Reader  [{mode_text}]"),
         };
 
         let header = Paragraph::new(Line::from(vec![Span::styled(
@@ -1520,13 +1611,19 @@ impl Ui {
             frame.render_widget(body, layout[1]);
         }
 
+        let up_down_label = if self.ctx.settings.reader_mode == ReaderMode::Image {
+            "pan"
+        } else {
+            "scroll"
+        };
+
         let mut footer_spans = vec![
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" back  "),
             Span::styled("←/→", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" page  "),
             Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" scroll  "),
+            Span::raw(format!(" {up_down_label}  ")),
             Span::styled("g", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" goto  "),
             Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
@@ -1540,6 +1637,30 @@ impl Ui {
             Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" dump"),
         ];
+
+        if self.ctx.settings.reader_mode == ReaderMode::Image {
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                "+/-",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" zoom  "));
+            footer_spans.push(Span::styled(
+                "0",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" reset  "));
+            footer_spans.push(Span::styled(
+                "h/j/k/l",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" pan  "));
+            footer_spans.push(Span::styled(
+                "PgUp/PgDn",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" page-pan"));
+        }
 
         if let Some(note) = &self.reader.notice {
             footer_spans.push(Span::raw("  |  "));
@@ -2171,7 +2292,16 @@ struct ReaderRenderKey {
     height: u16,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
+struct CachedPageImage {
+    page: u32,
+    zoom_percent: u16,
+    render_width_px: u32,
+    font_size: (u16, u16),
+    image: image::DynamicImage,
+}
+
+#[derive(Clone)]
 struct ReaderPanel {
     open: bool,
     book_path: Option<String>,
@@ -2179,11 +2309,37 @@ struct ReaderPanel {
     page: u32,
     total_pages: Option<u32>,
     scroll: u16,
+    image_zoom_percent: u16,
+    image_pan_x_px: u32,
+    image_pan_y_px: u32,
+    page_image: Option<CachedPageImage>,
     current_text: Option<String>,
     current_image: Option<ImageProtocol>,
     last_error: Option<String>,
     notice: Option<String>,
     render_key: Option<ReaderRenderKey>,
+}
+
+impl Default for ReaderPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            book_path: None,
+            book_title: None,
+            page: 0,
+            total_pages: None,
+            scroll: 0,
+            image_zoom_percent: 100,
+            image_pan_x_px: 0,
+            image_pan_y_px: 0,
+            page_image: None,
+            current_text: None,
+            current_image: None,
+            last_error: None,
+            notice: None,
+            render_key: None,
+        }
+    }
 }
 
 impl ReaderPanel {
@@ -2212,6 +2368,9 @@ impl ReaderPanel {
 
     fn invalidate_render(&mut self) {
         self.scroll = 0;
+        self.image_pan_x_px = 0;
+        self.image_pan_y_px = 0;
+        self.page_image = None;
         self.current_text = None;
         self.current_image = None;
         self.last_error = None;
@@ -2258,19 +2417,93 @@ impl ReaderPanel {
 
         match mode {
             ReaderMode::Image => {
-                match render_page_image_protocol(engine, picker, &book, self.page, width, height) {
+                let (font_w_px, font_h_px) = picker.font_size();
+                let font_w_px = font_w_px.max(1);
+                let font_h_px = font_h_px.max(1);
+
+                let viewport_w_px = u32::from(width).saturating_mul(u32::from(font_w_px)).max(1);
+                let viewport_h_px = u32::from(height)
+                    .saturating_mul(u32::from(font_h_px))
+                    .max(1);
+
+                let render_width_px = (u64::from(viewport_w_px)
+                    .saturating_mul(u64::from(self.image_zoom_percent.max(1))))
+                    / 100;
+                let render_width_px = render_width_px.clamp(1, i32::MAX as u64) as u32;
+
+                let need_new_page_image = match self.page_image.as_ref() {
+                    None => true,
+                    Some(cached) => {
+                        cached.page != self.page
+                            || cached.zoom_percent != self.image_zoom_percent
+                            || cached.render_width_px != render_width_px
+                            || cached.font_size != (font_w_px, font_h_px)
+                    }
+                };
+
+                if need_new_page_image {
+                    match render_page_image(engine, &book, self.page, render_width_px) {
+                        Ok(image) => {
+                            self.page_image = Some(CachedPageImage {
+                                page: self.page,
+                                zoom_percent: self.image_zoom_percent,
+                                render_width_px,
+                                font_size: (font_w_px, font_h_px),
+                                image,
+                            });
+                        }
+                        Err(err) => {
+                            self.page_image = None;
+                            let fallback = engine
+                                .render_page_text(&book, self.page)
+                                .unwrap_or_else(|_| "no text found".to_string());
+                            self.current_text = Some(format!(
+                                "(image render failed; showing text)\n(error: {err})\n\n{fallback}"
+                            ));
+                            self.current_image = None;
+                            self.last_error = None;
+                            self.render_key = Some(key);
+                            return;
+                        }
+                    }
+                }
+
+                let (view_image, pan_x_px, pan_y_px) = {
+                    let cached = match self.page_image.as_ref() {
+                        Some(cached) => cached,
+                        None => {
+                            self.current_text = Some("no image cached".to_string());
+                            self.current_image = None;
+                            self.last_error = None;
+                            self.render_key = Some(key);
+                            return;
+                        }
+                    };
+                    build_viewport_image(
+                        &cached.image,
+                        viewport_w_px,
+                        viewport_h_px,
+                        self.image_pan_x_px,
+                        self.image_pan_y_px,
+                    )
+                };
+
+                self.image_pan_x_px = pan_x_px;
+                self.image_pan_y_px = pan_y_px;
+
+                let size = Rect::new(0, 0, width, height);
+                match picker.new_protocol(view_image, size, Resize::Fit(None)) {
                     Ok(protocol) => {
                         self.current_text = None;
                         self.current_image = Some(protocol);
                         self.last_error = None;
-                        self.scroll = 0;
                     }
                     Err(err) => {
                         let fallback = engine
                             .render_page_text(&book, self.page)
                             .unwrap_or_else(|_| "no text found".to_string());
                         self.current_text = Some(format!(
-                            "(image render failed; showing text)\n(error: {err})\n\n{fallback}"
+                            "(image protocol failed; showing text)\n(error: {err})\n\n{fallback}"
                         ));
                         self.current_image = None;
                         self.last_error = None;
@@ -2329,37 +2562,130 @@ impl ReaderPanel {
         let lines = text.lines().count() as u16;
         self.scroll = (self.scroll + 1).min(lines.saturating_sub(1));
     }
+
+    fn pan_image_by_cells(&mut self, picker: &Picker, dx_cols: i32, dy_rows: i32) {
+        let (font_w_px, font_h_px) = picker.font_size();
+        let font_w_px = i32::from(font_w_px.max(1));
+        let font_h_px = i32::from(font_h_px.max(1));
+        self.pan_image_by_pixels(
+            dx_cols.saturating_mul(font_w_px),
+            dy_rows.saturating_mul(font_h_px),
+        );
+    }
+
+    fn pan_image_by_pixels(&mut self, dx_px: i32, dy_px: i32) {
+        self.image_pan_x_px = add_signed_u32(self.image_pan_x_px, dx_px);
+        self.image_pan_y_px = add_signed_u32(self.image_pan_y_px, dy_px);
+        self.current_image = None;
+        self.render_key = None;
+    }
+
+    fn zoom_image_in(&mut self) {
+        const MAX: u16 = 400;
+        const STEP: u16 = 25;
+        let zoom = self.image_zoom_percent.saturating_add(STEP).min(MAX);
+        self.set_image_zoom_percent(zoom);
+    }
+
+    fn zoom_image_out(&mut self) {
+        const MIN: u16 = 50;
+        const STEP: u16 = 25;
+        let zoom = self.image_zoom_percent.saturating_sub(STEP).max(MIN);
+        self.set_image_zoom_percent(zoom);
+    }
+
+    fn reset_image_view(&mut self) {
+        self.image_pan_x_px = 0;
+        self.image_pan_y_px = 0;
+        self.set_image_zoom_percent(100);
+        self.notice = Some("zoom: 100%".to_string());
+    }
+
+    fn set_image_zoom_percent(&mut self, zoom_percent: u16) {
+        const MIN: u16 = 50;
+        const MAX: u16 = 400;
+        let zoom_percent = zoom_percent.clamp(MIN, MAX);
+        if zoom_percent == self.image_zoom_percent {
+            return;
+        }
+        self.image_zoom_percent = zoom_percent;
+        self.image_pan_x_px = 0;
+        self.image_pan_y_px = 0;
+        self.page_image = None;
+        self.current_image = None;
+        self.render_key = None;
+        self.notice = Some(format!("zoom: {zoom_percent}%"));
+    }
 }
 
-fn render_page_image_protocol(
+fn add_signed_u32(value: u32, delta: i32) -> u32 {
+    if delta >= 0 {
+        value.saturating_add(delta as u32)
+    } else {
+        value.saturating_sub(delta.unsigned_abs())
+    }
+}
+
+fn render_page_image(
     engine: &Engine,
-    picker: &Picker,
     book: &bookshelf_core::Book,
     page_index: u32,
-    viewport_width_chars: u16,
-    viewport_height_chars: u16,
-) -> anyhow::Result<ImageProtocol> {
-    let (font_w_px, font_h_px) = picker.font_size();
-    let oversample = 2i32;
-    let target_width_px = i32::from(viewport_width_chars)
-        .saturating_mul(i32::from(font_w_px))
-        .saturating_mul(oversample);
-    let max_height_px = i32::from(viewport_height_chars)
-        .saturating_mul(i32::from(font_h_px))
-        .saturating_mul(oversample);
-
-    let bitmap =
-        engine.render_page_bitmap_rgba(book, page_index, target_width_px, max_height_px)?;
+    target_width_px: u32,
+) -> anyhow::Result<image::DynamicImage> {
+    let target_width_px = i32::try_from(target_width_px.clamp(1, i32::MAX as u32))
+        .unwrap_or(i32::MAX)
+        .max(1);
+    let bitmap = engine.render_page_bitmap_rgba(book, page_index, target_width_px, i32::MAX)?;
     let image =
         image::RgbaImage::from_raw(bitmap.width as u32, bitmap.height as u32, bitmap.pixels)
             .ok_or_else(|| anyhow::anyhow!("invalid RGBA pixel buffer from pdfium"))?;
-    let image = image::DynamicImage::ImageRgba8(image);
+    Ok(image::DynamicImage::ImageRgba8(image))
+}
 
-    let size = Rect::new(0, 0, viewport_width_chars, viewport_height_chars);
-    let resize = Resize::Fit(None);
-    picker
-        .new_protocol(image, size, resize)
-        .map_err(anyhow::Error::new)
+fn build_viewport_image(
+    full: &image::DynamicImage,
+    viewport_w_px: u32,
+    viewport_h_px: u32,
+    pan_x_px: u32,
+    pan_y_px: u32,
+) -> (image::DynamicImage, u32, u32) {
+    let viewport_w_px = viewport_w_px.max(1);
+    let viewport_h_px = viewport_h_px.max(1);
+    let img_w = full.width();
+    let img_h = full.height();
+
+    let max_pan_x = img_w.saturating_sub(viewport_w_px);
+    let max_pan_y = img_h.saturating_sub(viewport_h_px);
+
+    let pan_x_px = pan_x_px.min(max_pan_x);
+    let pan_y_px = pan_y_px.min(max_pan_y);
+
+    let mut viewport: image::DynamicImage = image::ImageBuffer::from_pixel(
+        viewport_w_px,
+        viewport_h_px,
+        image::Rgba([255u8, 255u8, 255u8, 255u8]),
+    )
+    .into();
+
+    let crop_w = viewport_w_px.min(img_w.saturating_sub(pan_x_px));
+    let crop_h = viewport_h_px.min(img_h.saturating_sub(pan_y_px));
+    if crop_w > 0 && crop_h > 0 {
+        let region = full.crop_imm(pan_x_px, pan_y_px, crop_w, crop_h);
+
+        let dest_x = if img_w < viewport_w_px {
+            i64::from((viewport_w_px - img_w) / 2)
+        } else {
+            0
+        };
+        let dest_y = if img_h < viewport_h_px {
+            i64::from((viewport_h_px - img_h) / 2)
+        } else {
+            0
+        };
+        image::imageops::overlay(&mut viewport, &region, dest_x, dest_y);
+    }
+
+    (viewport, pan_x_px, pan_y_px)
 }
 
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
