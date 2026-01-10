@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Context as _;
-use bookshelf_core::{Book, PreviewMode, Settings, TocItem};
+use bookshelf_core::{Book, PreviewMode, ReaderMode, Settings, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
 use pdf::font::ToUnicodeMap;
@@ -357,48 +357,14 @@ impl Engine {
         &self,
         book: &Book,
         page_index: u32,
-        mode: PreviewMode,
-        viewport_width_chars: u16,
-        viewport_height_chars: u16,
+        mode: ReaderMode,
+        _viewport_width_chars: u16,
+        _viewport_height_chars: u16,
     ) -> anyhow::Result<String> {
         match mode {
-            PreviewMode::Text => self.render_page_text(book, page_index),
-            PreviewMode::Braille | PreviewMode::Blocks => {
-                if self.pdfium_disabled() {
-                    let fallback = self
-                        .render_page_text(book, page_index)
-                        .unwrap_or_else(|_| "no text found".to_string());
-                    return Ok(format!(
-                        "(pdfium disabled via BOOKSHELF_DISABLE_PDFIUM; set Preview mode to text to hide this)\n\n{fallback}"
-                    ));
-                }
-                let viewport_height_chars = viewport_height_chars.max(1);
-                let max_height_chars = viewport_height_chars.saturating_mul(12);
-                match self.render_page_raster(
-                    book,
-                    page_index,
-                    mode,
-                    viewport_width_chars.max(1),
-                    max_height_chars.max(viewport_height_chars),
-                ) {
-                    Ok(text) => Ok(text),
-                    Err(err) if self.pdfium_unavailable() => {
-                        let fallback = self
-                            .render_page_text(book, page_index)
-                            .unwrap_or_else(|_| "no text found".to_string());
-                        Ok(format!(
-                            "(pdfium not available; set Preview mode to text to hide this)\n\n{fallback}"
-                        ))
-                    }
-                    Err(err) => {
-                        let fallback = self
-                            .render_page_text(book, page_index)
-                            .unwrap_or_else(|_| "no text found".to_string());
-                        Ok(format!(
-                            "(pdfium render failed; showing text)\n(error: {err})\n\n{fallback}"
-                        ))
-                    }
-                }
+            ReaderMode::Text => self.render_page_text(book, page_index),
+            ReaderMode::Image => {
+                anyhow::bail!("image mode is rendered in the UI (ratatui-image), not as text")
             }
         }
     }
@@ -638,6 +604,75 @@ impl Engine {
         })
     }
 
+    pub fn render_page_bitmap_rgba(
+        &self,
+        book: &Book,
+        page_index: u32,
+        target_width: i32,
+        max_height: i32,
+    ) -> anyhow::Result<RgbaBitmap> {
+        if self.pdfium_disabled() {
+            anyhow::bail!("pdfium disabled via BOOKSHELF_DISABLE_PDFIUM");
+        }
+
+        let pdfium = self.pdfium()?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let document = pdfium
+            .load_pdf_from_file(&path, None)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let page_index =
+            u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
+        let page = document
+            .pages()
+            .get(page_index)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(target_width.max(1))
+            .set_maximum_width(target_width.max(1))
+            .set_maximum_height(max_height.max(1))
+            .render_form_data(false)
+            .render_annotations(false)
+            .use_grayscale_rendering(false)
+            .set_reverse_byte_order(false)
+            .set_format(PdfBitmapFormat::BGRA);
+
+        let bitmap = page
+            .render_with_config(&render_config)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let width = bitmap.width().max(0) as usize;
+        let height = bitmap.height().max(0) as usize;
+        let src_pixels = bitmap.as_raw_bytes();
+
+        let src_stride = if height == 0 {
+            0
+        } else {
+            src_pixels.len() / height
+        };
+
+        let mut pixels = Vec::with_capacity(width.saturating_mul(height).saturating_mul(4));
+        for y in 0..height {
+            let base = y.saturating_mul(src_stride);
+            for x in 0..width {
+                let idx = base.saturating_add(x.saturating_mul(4));
+                let b = src_pixels.get(idx).copied().unwrap_or(255);
+                let g = src_pixels.get(idx + 1).copied().unwrap_or(255);
+                let r = src_pixels.get(idx + 2).copied().unwrap_or(255);
+                let a = src_pixels.get(idx + 3).copied().unwrap_or(255);
+                pixels.extend_from_slice(&[r, g, b, a]);
+            }
+        }
+
+        Ok(RgbaBitmap {
+            width,
+            height,
+            stride: width.saturating_mul(4),
+            pixels,
+        })
+    }
+
     fn pdfium(&self) -> anyhow::Result<Ref<'_, Pdfium>> {
         let init_error = {
             let mut state = self.pdfium.borrow_mut();
@@ -754,6 +789,14 @@ impl GrayBitmap {
         let idx = y.saturating_mul(self.stride).saturating_add(x);
         self.pixels.get(idx).copied().unwrap_or(255)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RgbaBitmap {
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub pixels: Vec<u8>,
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {

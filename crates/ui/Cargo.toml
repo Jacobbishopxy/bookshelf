@@ -9,5 +9,7 @@ bookshelf_core = { package = "bookshelf-core", path = "../core" }
 bookshelf_engine = { package = "engine", path = "../engine" }
 anyhow.workspace = true
 crossterm.workspace = true
+image.workspace = true
 ratatui.workspace = true
+ratatui-image.workspace = true
 unicode-width.workspace = true

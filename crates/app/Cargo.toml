@@ -11,3 +11,4 @@ bookshelf_storage = { package = "storage", path = "../storage" }
 bookshelf_ui = { package = "ui", path = "../ui" }
 anyhow.workspace = true
 directories.workspace = true
+ratatui-image.workspace = true

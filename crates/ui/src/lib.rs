@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
 use bookshelf_core::{
-    Bookmark, MAX_PREVIEW_DEPTH, MAX_PREVIEW_PAGES, Note, PreviewMode, Settings, TocItem,
+    Bookmark, MAX_PREVIEW_DEPTH, MAX_PREVIEW_PAGES, Note, ReaderMode, Settings, TocItem,
 };
 use bookshelf_engine::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -22,6 +22,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::Protocol as ImageProtocol;
+use ratatui_image::{Image as ImageWidget, Resize};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +39,6 @@ pub struct UiOutcome {
     pub exit: UiExit,
 }
 
-#[derive(Debug)]
 pub struct Ui {
     ctx: AppContext,
     settings_panel: SettingsPanel,
@@ -49,6 +51,7 @@ pub struct Ui {
     toc_panel: TocPanel,
     reader: ReaderPanel,
     engine: Engine,
+    image_picker: Picker,
     meta_cache: BookMetaCache,
 }
 
@@ -65,6 +68,7 @@ impl Ui {
         let toc_panel = TocPanel::default();
         let reader = ReaderPanel::default();
         let meta_cache = BookMetaCache::default();
+        let image_picker = Picker::halfblocks();
         Self {
             ctx,
             settings_panel,
@@ -77,12 +81,14 @@ impl Ui {
             toc_panel,
             reader,
             engine: Engine::new(),
+            image_picker,
             meta_cache,
         }
     }
 
     pub fn run(&mut self) -> anyhow::Result<UiOutcome> {
         let mut terminal = setup_terminal()?;
+        self.image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.event_loop(&mut terminal)
         }));
@@ -339,6 +345,12 @@ impl Ui {
             }
             KeyCode::Char('t') => {
                 self.open_toc_panel();
+                Ok(None)
+            }
+            KeyCode::Char('m') => {
+                self.ctx.settings.cycle_reader_mode();
+                self.reader.invalidate_render();
+                self.reader.notice = Some(format!("mode: {}", self.ctx.settings.reader_mode));
                 Ok(None)
             }
             KeyCode::Left => {
@@ -1448,28 +1460,65 @@ impl Ui {
 
         let inner_width = layout[1].width.saturating_sub(2);
         let inner_height = layout[1].height.saturating_sub(2);
-        self.reader
-            .ensure_rendered(&self.ctx, &self.engine, inner_width, inner_height);
-
-        let content = self.reader.current_text.clone().unwrap_or_else(|| {
-            self.reader
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "loading...".to_string())
-        });
-
-        let text = Text::from(
-            content
-                .lines()
-                .skip(self.reader.scroll as usize)
-                .map(|line| Line::raw(line.to_string()))
-                .collect::<Vec<_>>(),
+        self.reader.ensure_rendered(
+            &self.ctx,
+            &self.engine,
+            &self.image_picker,
+            inner_width,
+            inner_height,
         );
 
-        let body = Paragraph::new(text)
-            .block(Block::default().borders(Borders::ALL).title("Page"))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(body, layout[1]);
+        if self.ctx.settings.reader_mode == ReaderMode::Image {
+            let block = Block::default().borders(Borders::ALL).title("Page");
+            frame.render_widget(block.clone(), layout[1]);
+            let inner = block.inner(layout[1]);
+
+            if let Some(protocol) = self.reader.current_image.as_ref() {
+                let proto_area = protocol.area();
+                let draw_width = proto_area.width.min(inner.width);
+                let draw_height = proto_area.height.min(inner.height);
+                let draw_area = Rect::new(
+                    inner.x + inner.width.saturating_sub(draw_width) / 2,
+                    inner.y + inner.height.saturating_sub(draw_height) / 2,
+                    draw_width,
+                    draw_height,
+                );
+                frame.render_widget(ImageWidget::new(protocol), draw_area);
+            } else {
+                let content = self.reader.current_text.clone().unwrap_or_else(|| {
+                    self.reader
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "loading...".to_string())
+                });
+                let text = Text::from(
+                    content
+                        .lines()
+                        .skip(self.reader.scroll as usize)
+                        .map(|line| Line::raw(line.to_string()))
+                        .collect::<Vec<_>>(),
+                );
+                frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+            }
+        } else {
+            let content = self.reader.current_text.clone().unwrap_or_else(|| {
+                self.reader
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "loading...".to_string())
+            });
+            let text = Text::from(
+                content
+                    .lines()
+                    .skip(self.reader.scroll as usize)
+                    .map(|line| Line::raw(line.to_string()))
+                    .collect::<Vec<_>>(),
+            );
+            let body = Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title("Page"))
+                .wrap(Wrap { trim: false });
+            frame.render_widget(body, layout[1]);
+        }
 
         let mut footer_spans = vec![
             Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
@@ -1486,6 +1535,8 @@ impl Ui {
             Span::raw(" bookmarks  "),
             Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" notes  "),
+            Span::styled("m", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" mode  "),
             Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" dump"),
         ];
@@ -2115,12 +2166,12 @@ struct BookMetaCache {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReaderRenderKey {
     page: u32,
-    mode: PreviewMode,
+    mode: ReaderMode,
     width: u16,
     height: u16,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct ReaderPanel {
     open: bool,
     book_path: Option<String>,
@@ -2129,6 +2180,7 @@ struct ReaderPanel {
     total_pages: Option<u32>,
     scroll: u16,
     current_text: Option<String>,
+    current_image: Option<ImageProtocol>,
     last_error: Option<String>,
     notice: Option<String>,
     render_key: Option<ReaderRenderKey>,
@@ -2161,15 +2213,23 @@ impl ReaderPanel {
     fn invalidate_render(&mut self) {
         self.scroll = 0;
         self.current_text = None;
+        self.current_image = None;
         self.last_error = None;
         self.notice = None;
         self.render_key = None;
     }
 
-    fn ensure_rendered(&mut self, ctx: &AppContext, engine: &Engine, width: u16, height: u16) {
+    fn ensure_rendered(
+        &mut self,
+        ctx: &AppContext,
+        engine: &Engine,
+        picker: &Picker,
+        width: u16,
+        height: u16,
+    ) {
         let width = width.max(1);
         let height = height.max(1);
-        let mode = ctx.settings.preview_mode;
+        let mode = ctx.settings.reader_mode;
 
         let Some(book) = self.current_book() else {
             self.current_text = None;
@@ -2190,25 +2250,51 @@ impl ReaderPanel {
             height,
         };
 
-        if self.current_text.is_some() && self.render_key == Some(key) {
+        if (self.current_text.is_some() || self.current_image.is_some())
+            && self.render_key == Some(key)
+        {
             return;
         }
 
-        match engine.render_page_for_reader(&book, self.page, mode, width, height) {
-            Ok(text) => {
-                let lines = text.lines().count() as u16;
-                if lines == 0 {
-                    self.scroll = 0;
-                } else {
-                    self.scroll = self.scroll.min(lines.saturating_sub(1));
+        match mode {
+            ReaderMode::Image => {
+                match render_page_image_protocol(engine, picker, &book, self.page, width, height) {
+                    Ok(protocol) => {
+                        self.current_text = None;
+                        self.current_image = Some(protocol);
+                        self.last_error = None;
+                        self.scroll = 0;
+                    }
+                    Err(err) => {
+                        let fallback = engine
+                            .render_page_text(&book, self.page)
+                            .unwrap_or_else(|_| "no text found".to_string());
+                        self.current_text = Some(format!(
+                            "(image render failed; showing text)\n(error: {err})\n\n{fallback}"
+                        ));
+                        self.current_image = None;
+                        self.last_error = None;
+                    }
                 }
-                self.current_text = Some(text);
-                self.last_error = None;
             }
-            Err(err) => {
-                self.current_text = None;
-                self.last_error = Some(err.to_string());
-            }
+            _ => match engine.render_page_for_reader(&book, self.page, mode, width, height) {
+                Ok(text) => {
+                    let lines = text.lines().count() as u16;
+                    if lines == 0 {
+                        self.scroll = 0;
+                    } else {
+                        self.scroll = self.scroll.min(lines.saturating_sub(1));
+                    }
+                    self.current_text = Some(text);
+                    self.current_image = None;
+                    self.last_error = None;
+                }
+                Err(err) => {
+                    self.current_text = None;
+                    self.current_image = None;
+                    self.last_error = Some(err.to_string());
+                }
+            },
         }
 
         self.render_key = Some(key);
@@ -2243,6 +2329,37 @@ impl ReaderPanel {
         let lines = text.lines().count() as u16;
         self.scroll = (self.scroll + 1).min(lines.saturating_sub(1));
     }
+}
+
+fn render_page_image_protocol(
+    engine: &Engine,
+    picker: &Picker,
+    book: &bookshelf_core::Book,
+    page_index: u32,
+    viewport_width_chars: u16,
+    viewport_height_chars: u16,
+) -> anyhow::Result<ImageProtocol> {
+    let (font_w_px, font_h_px) = picker.font_size();
+    let oversample = 2i32;
+    let target_width_px = i32::from(viewport_width_chars)
+        .saturating_mul(i32::from(font_w_px))
+        .saturating_mul(oversample);
+    let max_height_px = i32::from(viewport_height_chars)
+        .saturating_mul(i32::from(font_h_px))
+        .saturating_mul(oversample);
+
+    let bitmap =
+        engine.render_page_bitmap_rgba(book, page_index, target_width_px, max_height_px)?;
+    let image =
+        image::RgbaImage::from_raw(bitmap.width as u32, bitmap.height as u32, bitmap.pixels)
+            .ok_or_else(|| anyhow::anyhow!("invalid RGBA pixel buffer from pdfium"))?;
+    let image = image::DynamicImage::ImageRgba8(image);
+
+    let size = Rect::new(0, 0, viewport_width_chars, viewport_height_chars);
+    let resize = Resize::Fit(None);
+    picker
+        .new_protocol(image, size, resize)
+        .map_err(anyhow::Error::new)
 }
 
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {

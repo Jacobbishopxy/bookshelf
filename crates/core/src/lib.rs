@@ -96,6 +96,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[serde(default)]
 pub struct Settings {
     pub preview_mode: PreviewMode,
+    pub reader_mode: ReaderMode,
     pub preview_depth: usize,
     pub preview_pages: usize,
     pub scan_scope: ScanScope,
@@ -111,6 +112,13 @@ pub enum PreviewMode {
     Text,
     Braille,
     Blocks,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReaderMode {
+    Text,
+    Image,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +157,33 @@ impl std::str::FromStr for PreviewMode {
     }
 }
 
+impl ReaderMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReaderMode::Text => "text",
+            ReaderMode::Image => "image",
+        }
+    }
+}
+
+impl std::fmt::Display for ReaderMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ReaderMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "text" => Ok(ReaderMode::Text),
+            "image" => Ok(ReaderMode::Image),
+            _ => Err("unknown reader mode"),
+        }
+    }
+}
+
 impl ScanScope {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -180,6 +215,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             preview_mode: PreviewMode::Text,
+            reader_mode: ReaderMode::Text,
             preview_depth: 5,
             preview_pages: 2,
             scan_scope: ScanScope::Recursive,
@@ -207,6 +243,13 @@ impl Settings {
             PreviewMode::Text => PreviewMode::Braille,
             PreviewMode::Braille => PreviewMode::Blocks,
             PreviewMode::Blocks => PreviewMode::Text,
+        };
+    }
+
+    pub fn cycle_reader_mode(&mut self) {
+        self.reader_mode = match self.reader_mode {
+            ReaderMode::Text => ReaderMode::Image,
+            ReaderMode::Image => ReaderMode::Text,
         };
     }
 
@@ -309,6 +352,24 @@ mod tests {
             PreviewMode::Blocks
         );
         assert!("nope".parse::<PreviewMode>().is_err());
+        assert!("image".parse::<PreviewMode>().is_err());
+    }
+
+    #[test]
+    fn cycle_reader_mode_rotates() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.reader_mode, ReaderMode::Text);
+        settings.cycle_reader_mode();
+        assert_eq!(settings.reader_mode, ReaderMode::Image);
+        settings.cycle_reader_mode();
+        assert_eq!(settings.reader_mode, ReaderMode::Text);
+    }
+
+    #[test]
+    fn reader_mode_parses_strings() {
+        assert_eq!("text".parse::<ReaderMode>().unwrap(), ReaderMode::Text);
+        assert_eq!(" IMAGE ".parse::<ReaderMode>().unwrap(), ReaderMode::Image);
+        assert!("nope".parse::<ReaderMode>().is_err());
     }
 
     #[test]
@@ -325,6 +386,7 @@ mod tests {
     fn settings_normalizes_depth() {
         let mut settings = Settings {
             preview_mode: PreviewMode::Text,
+            reader_mode: ReaderMode::Text,
             preview_depth: 0,
             scan_scope: ScanScope::Direct,
             preview_pages: 0,
