@@ -2,8 +2,11 @@
 
 use std::hash::Hasher;
 use std::io::{self, Stdout};
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
@@ -23,6 +26,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui_image::picker::Picker;
+use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::protocol::Protocol as ImageProtocol;
 use ratatui_image::{Image as ImageWidget, Resize};
 
@@ -57,6 +61,7 @@ pub struct Ui {
     ignore_next_esc_quit: bool,
     engine: Engine,
     image_picker: Picker,
+    spawned_kitties: Vec<std::process::Child>,
     meta_cache: BookMetaCache,
 }
 
@@ -89,6 +94,7 @@ impl Ui {
             ignore_next_esc_quit: false,
             engine: Engine::new(),
             image_picker,
+            spawned_kitties: Vec::new(),
             meta_cache,
         };
         ui.bootstrap_reader_from_env();
@@ -112,13 +118,32 @@ impl Ui {
         let restore_result = restore_terminal(&mut terminal);
 
         match (result, restore_result) {
-            (Ok(res), Ok(())) => res,
+            (Ok(Ok(outcome)), Ok(())) => {
+                if outcome.exit == UiExit::Quit {
+                    self.kill_spawned_kitties();
+                }
+                Ok(outcome)
+            }
+            (Ok(Ok(outcome)), Err(err)) => {
+                if outcome.exit == UiExit::Quit {
+                    self.kill_spawned_kitties();
+                }
+                Err(err)
+            }
+            (Ok(Err(err)), Ok(())) => Err(err),
             (Ok(_), Err(err)) => Err(err),
             (Err(panic), Ok(())) => Err(anyhow::anyhow!(panic_to_string(panic))),
             (Err(panic), Err(err)) => Err(anyhow::anyhow!(
                 "{}\n(additionally failed to restore terminal: {err})",
                 panic_to_string(panic)
             )),
+        }
+    }
+
+    fn kill_spawned_kitties(&mut self) {
+        for mut child in self.spawned_kitties.drain(..) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -191,86 +216,100 @@ impl Ui {
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> anyhow::Result<UiOutcome> {
         let tick_rate = Duration::from_millis(250);
+        let mut needs_redraw = true;
 
         loop {
-            terminal.draw(|frame| self.draw(frame.area(), frame))?;
+            if needs_redraw {
+                terminal.draw(|frame| self.draw(frame.area(), frame))?;
+                needs_redraw = false;
+            }
 
-            if event::poll(tick_rate)?
-                && let Event::Key(key) = event::read()?
-            {
-                if key.kind == KeyEventKind::Release {
-                    continue;
-                }
+            if !event::poll(tick_rate)? {
+                continue;
+            }
 
-                if self.settings_panel.open {
-                    if let Some(exit) = self.handle_settings_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.search_panel.open {
-                    if let Some(exit) = self.handle_search_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.reader.open && self.bookmarks_panel.open {
-                    if let Some(exit) = self.handle_bookmarks_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.reader.open && self.goto_panel.open {
-                    if let Some(exit) = self.handle_goto_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.reader.open && self.toc_panel.open {
-                    if let Some(exit) = self.handle_toc_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.reader.open && self.notes_panel.open {
-                    if let Some(exit) = self.handle_notes_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.reader.open {
-                    if let Some(exit) = self.handle_reader_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.scan_panel.open {
-                    if let Some(exit) = self.handle_scan_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if self.preview_panel.open {
-                    if let Some(exit) = self.handle_preview_panel_key(key)? {
-                        return Ok(UiOutcome {
-                            ctx: self.ctx.clone(),
-                            exit,
-                        });
-                    }
-                } else if let Some(exit) = self.handle_main_key(key)? {
-                    return Ok(UiOutcome {
-                        ctx: self.ctx.clone(),
-                        exit,
-                    });
+            match event::read()? {
+                Event::Resize(_, _) => {
+                    needs_redraw = true;
                 }
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Release {
+                        continue;
+                    }
+
+                    needs_redraw = true;
+
+                    if self.settings_panel.open {
+                        if let Some(exit) = self.handle_settings_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.search_panel.open {
+                        if let Some(exit) = self.handle_search_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.reader.open && self.bookmarks_panel.open {
+                        if let Some(exit) = self.handle_bookmarks_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.reader.open && self.goto_panel.open {
+                        if let Some(exit) = self.handle_goto_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.reader.open && self.toc_panel.open {
+                        if let Some(exit) = self.handle_toc_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.reader.open && self.notes_panel.open {
+                        if let Some(exit) = self.handle_notes_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.reader.open {
+                        if let Some(exit) = self.handle_reader_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.scan_panel.open {
+                        if let Some(exit) = self.handle_scan_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.preview_panel.open {
+                        if let Some(exit) = self.handle_preview_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if let Some(exit) = self.handle_main_key(key)? {
+                        return Ok(UiOutcome {
+                            ctx: self.ctx.clone(),
+                            exit,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -378,14 +417,14 @@ impl Ui {
                         .progress_by_path
                         .insert(path, self.reader.page.saturating_add(1));
                 }
+                if self.boot_reader_session {
+                    return Ok(Some(UiExit::Quit));
+                }
                 self.reader = ReaderPanel::default();
                 self.goto_panel = GotoPanel::default();
                 self.bookmarks_panel = BookmarksPanel::default();
                 self.notes_panel = NotesPanel::default();
                 self.toc_panel = TocPanel::default();
-                if self.boot_reader_session {
-                    self.ignore_next_esc_quit = true;
-                }
                 Ok(None)
             }
             KeyCode::Char('g') => {
@@ -415,8 +454,28 @@ impl Ui {
                     let tmux = std::env::var("TMUX").unwrap_or_default();
                     let kitty_window_id = std::env::var("KITTY_WINDOW_ID").unwrap_or_default();
                     let (font_w, font_h) = self.image_picker.font_size();
+                    let timing_block = self.reader.last_image_timings.map(|t| {
+                        let rasterize_ms = t
+                            .rasterize_ms
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "-".to_string());
+                        format!(
+                            "\nreader-image:\n  total_ms={}\n  rasterize_ms={}\n  viewport_ms={}\n  downscale_ms={}\n  protocol_ms={}\n  viewport_px={}x{}\n  transmit_px={}x{}\n  render_width_px={}\n",
+                            t.total_ms,
+                            rasterize_ms,
+                            t.viewport_ms,
+                            t.downscale_ms,
+                            t.protocol_ms,
+                            t.viewport_px.0,
+                            t.viewport_px.1,
+                            t.transmit_px.0,
+                            t.transmit_px.1,
+                            t.render_width_px,
+                        )
+                    });
                     let debug = format!(
-                        "env:\n  TERM={term}\n  TERM_PROGRAM={term_program}\n  TMUX={tmux}\n  KITTY_WINDOW_ID={kitty_window_id}\n\nratatui-image:\n  font_size_px={font_w}x{font_h}\n\n-----\n\n{}",
+                        "env:\n  TERM={term}\n  TERM_PROGRAM={term_program}\n  TMUX={tmux}\n  KITTY_WINDOW_ID={kitty_window_id}\n\nratatui-image:\n  font_size_px={font_w}x{font_h}{}\n\n-----\n\n{}",
+                        timing_block.unwrap_or_default(),
                         self.engine.debug_page_text(&book, self.reader.page)?
                     );
                     std::fs::write(&path, debug)?;
@@ -473,11 +532,23 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Left => {
-                self.reader.prev_page();
+                if self.ctx.settings.reader_mode == ReaderMode::Image
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    self.reader.pan_image_by_cells(&self.image_picker, -5, 0);
+                } else {
+                    self.reader.prev_page();
+                }
                 Ok(None)
             }
             KeyCode::Right => {
-                self.reader.next_page();
+                if self.ctx.settings.reader_mode == ReaderMode::Image
+                    && key.modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    self.reader.pan_image_by_cells(&self.image_picker, 5, 0);
+                } else {
+                    self.reader.next_page();
+                }
                 Ok(None)
             }
             KeyCode::Up => {
@@ -528,37 +599,22 @@ impl Ui {
                 }
                 Ok(None)
             }
-            KeyCode::Char('h') => {
-                if self.ctx.settings.reader_mode == ReaderMode::Image {
-                    self.reader.pan_image_by_cells(&self.image_picker, -5, 0);
-                }
-                Ok(None)
-            }
-            KeyCode::Char('j') => {
-                if self.ctx.settings.reader_mode == ReaderMode::Image {
-                    self.reader.pan_image_by_cells(&self.image_picker, 0, 5);
-                }
-                Ok(None)
-            }
             KeyCode::Char('k') => {
-                if self.ctx.settings.reader_mode == ReaderMode::Image {
-                    self.reader.pan_image_by_cells(&self.image_picker, 0, -5);
-                } else if !image_protocol::kitty_supported(&self.image_picker) {
+                if self.ctx.settings.reader_mode == ReaderMode::Text
+                    && !image_protocol::kitty_supported(&self.image_picker)
+                {
                     let spawned = if let Some(path) = self.reader.book_path.as_deref() {
                         kitty_spawn::spawn_kitty_reader_with_current_exe(path, self.reader.page)
                     } else {
                         kitty_spawn::spawn_kitty_with_current_exe()
                     };
                     match spawned {
-                        Ok(()) => self.reader.notice = Some("spawned kitty reader".to_string()),
+                        Ok(child) => {
+                            self.spawned_kitties.push(child);
+                            self.reader.notice = Some("spawned kitty reader".to_string());
+                        }
                         Err(err) => self.reader.notice = Some(format!("kitty spawn failed: {err}")),
                     }
-                }
-                Ok(None)
-            }
-            KeyCode::Char('l') => {
-                if self.ctx.settings.reader_mode == ReaderMode::Image {
-                    self.reader.pan_image_by_cells(&self.image_picker, 5, 0);
                 }
                 Ok(None)
             }
@@ -1762,7 +1818,7 @@ impl Ui {
         }
 
         let up_down_label = if self.ctx.settings.reader_mode == ReaderMode::Image {
-            "pan"
+            "pan-y"
         } else {
             "scroll"
         };
@@ -1820,10 +1876,10 @@ impl Ui {
             ));
             footer_spans.push(Span::raw(" reset  "));
             footer_spans.push(Span::styled(
-                "h/j/k/l",
+                "Shift+←/→",
                 Style::default().add_modifier(Modifier::BOLD),
             ));
-            footer_spans.push(Span::raw(" pan  "));
+            footer_spans.push(Span::raw(" pan-x  "));
             footer_spans.push(Span::styled(
                 "PgUp/PgDn",
                 Style::default().add_modifier(Modifier::BOLD),
@@ -2467,7 +2523,19 @@ struct CachedPageImage {
     zoom_percent: u16,
     render_width_px: u32,
     font_size: (u16, u16),
-    image: image::DynamicImage,
+    image: Arc<image::DynamicImage>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ReaderImageTimings {
+    total_ms: u128,
+    rasterize_ms: Option<u128>,
+    viewport_ms: u128,
+    downscale_ms: u128,
+    protocol_ms: u128,
+    viewport_px: (u32, u32),
+    transmit_px: (u32, u32),
+    render_width_px: u32,
 }
 
 #[derive(Clone)]
@@ -2482,11 +2550,14 @@ struct ReaderPanel {
     image_pan_x_px: u32,
     image_pan_y_px: u32,
     page_image: Option<CachedPageImage>,
+    page_image_cache: VecDeque<CachedPageImage>,
     current_text: Option<String>,
     current_image: Option<ImageProtocol>,
     last_error: Option<String>,
     notice: Option<String>,
     render_key: Option<ReaderRenderKey>,
+    last_image_timings: Option<ReaderImageTimings>,
+    next_kitty_image_id: u32,
 }
 
 impl Default for ReaderPanel {
@@ -2502,11 +2573,14 @@ impl Default for ReaderPanel {
             image_pan_x_px: 0,
             image_pan_y_px: 0,
             page_image: None,
+            page_image_cache: VecDeque::new(),
             current_text: None,
             current_image: None,
             last_error: None,
             notice: None,
             render_key: None,
+            last_image_timings: None,
+            next_kitty_image_id: 1,
         }
     }
 }
@@ -2516,6 +2590,7 @@ impl ReaderPanel {
         self.open = true;
         self.book_path = Some(book.path.clone());
         self.book_title = Some(book.title.clone());
+        self.page_image_cache.clear();
         let saved = ctx.progress_by_path.get(&book.path).copied().unwrap_or(1);
         self.page = saved.saturating_sub(1);
         self.total_pages = engine.page_count(book).ok();
@@ -2545,6 +2620,23 @@ impl ReaderPanel {
         self.last_error = None;
         self.notice = None;
         self.render_key = None;
+        self.last_image_timings = None;
+    }
+
+    fn cache_page_image(&mut self, image: CachedPageImage) {
+        const MAX: usize = 3;
+        if let Some(pos) = self.page_image_cache.iter().position(|c| {
+            c.page == image.page
+                && c.zoom_percent == image.zoom_percent
+                && c.render_width_px == image.render_width_px
+                && c.font_size == image.font_size
+        }) {
+            let _ = self.page_image_cache.remove(pos);
+        }
+        self.page_image_cache.push_front(image);
+        while self.page_image_cache.len() > MAX {
+            self.page_image_cache.pop_back();
+        }
     }
 
     fn ensure_rendered(
@@ -2586,6 +2678,7 @@ impl ReaderPanel {
 
         match mode {
             ReaderMode::Image => {
+                let total_start = Instant::now();
                 let (font_w_px, font_h_px) = picker.font_size();
                 let font_w_px = font_w_px.max(1);
                 let font_h_px = font_h_px.max(1);
@@ -2595,9 +2688,23 @@ impl ReaderPanel {
                     .saturating_mul(u32::from(font_h_px))
                     .max(1);
 
-                let render_width_px = (u64::from(viewport_w_px)
-                    .saturating_mul(u64::from(self.image_zoom_percent.max(1))))
-                    / 100;
+                let fit_page_to_frame =
+                    self.image_zoom_percent == 100 && self.image_pan_x_px == 0 && self.image_pan_y_px == 0;
+
+                let base_render_width_px = if fit_page_to_frame {
+                    let (page_w_pt, page_h_pt) =
+                        engine.page_size_points(&book, self.page).unwrap_or((1.0, 1.0));
+                    let ratio = (page_w_pt as f64 / page_h_pt.max(1.0) as f64)
+                        .clamp(0.05, 20.0);
+                    let fit_w = (viewport_h_px as f64 * ratio).round().max(1.0) as u32;
+                    viewport_w_px.min(fit_w)
+                } else {
+                    viewport_w_px
+                };
+
+                let render_width_px =
+                    (u64::from(base_render_width_px).saturating_mul(u64::from(self.image_zoom_percent.max(1))))
+                        / 100;
                 let render_width_px = render_width_px.clamp(1, i32::MAX as u64) as u32;
 
                 let need_new_page_image = match self.page_image.as_ref() {
@@ -2610,34 +2717,51 @@ impl ReaderPanel {
                     }
                 };
 
+                let mut rasterize_ms: Option<u128> = None;
                 if need_new_page_image {
-                    match render_page_image(engine, &book, self.page, render_width_px) {
-                        Ok(image) => {
-                            self.page_image = Some(CachedPageImage {
-                                page: self.page,
-                                zoom_percent: self.image_zoom_percent,
-                                render_width_px,
-                                font_size: (font_w_px, font_h_px),
-                                image,
-                            });
-                        }
-                        Err(err) => {
-                            self.page_image = None;
-                            let fallback = engine
-                                .render_page_text(&book, self.page)
-                                .unwrap_or_else(|_| "no text found".to_string());
-                            self.current_text = Some(format!(
-                                "(image render failed; showing text)\n(error: {err})\n\n{fallback}"
-                            ));
-                            self.current_image = None;
-                            self.last_error = None;
-                            self.render_key = Some(key);
-                            return;
+                    if let Some(pos) = self.page_image_cache.iter().position(|c| {
+                        c.page == self.page
+                            && c.zoom_percent == self.image_zoom_percent
+                            && c.render_width_px == render_width_px
+                            && c.font_size == (font_w_px, font_h_px)
+                    }) && let Some(cached) = self.page_image_cache.remove(pos) {
+                        self.page_image = Some(cached);
+                    } else {
+                        let rasterize_start = Instant::now();
+                        match render_page_image(engine, &book, self.page, render_width_px) {
+                            Ok(image) => {
+                                let cached = CachedPageImage {
+                                    page: self.page,
+                                    zoom_percent: self.image_zoom_percent,
+                                    render_width_px,
+                                    font_size: (font_w_px, font_h_px),
+                                    image: Arc::new(image),
+                                };
+                                self.cache_page_image(cached.clone());
+                                self.page_image = Some(cached);
+                                rasterize_ms = Some(rasterize_start.elapsed().as_millis());
+                            }
+                            Err(err) => {
+                                self.page_image = None;
+                                let fallback = engine
+                                    .render_page_text(&book, self.page)
+                                    .unwrap_or_else(|_| "no text found".to_string());
+                                self.current_text = Some(format!(
+                                    "(image render failed; showing text)\n(error: {err})\n\n{fallback}"
+                                ));
+                                self.current_image = None;
+                                self.last_error = None;
+                                self.render_key = Some(key);
+                                return;
+                            }
                         }
                     }
                 }
 
-                let (view_image, pan_x_px, pan_y_px) = {
+                let size = Rect::new(0, 0, width, height);
+                let protocol_start = Instant::now();
+                let mut downscale_ms = 0;
+                let (protocol_result, viewport_ms, transmit_px) = if fit_page_to_frame {
                     let cached = match self.page_image.as_ref() {
                         Some(cached) => cached,
                         None => {
@@ -2648,34 +2772,129 @@ impl ReaderPanel {
                             return;
                         }
                     };
-                    build_viewport_image(
-                        &cached.image,
-                        viewport_w_px,
-                        viewport_h_px,
-                        self.image_pan_x_px,
-                        self.image_pan_y_px,
-                    )
+                    let proto = picker.new_protocol(
+                        (*cached.image).clone(),
+                        size,
+                        Resize::Fit(Some(image::imageops::FilterType::Triangle)),
+                    );
+                    let (w, h) = (cached.image.width(), cached.image.height());
+                    (proto, 0, (w, h))
+                } else {
+                    let viewport_start = Instant::now();
+                    let (view_image, pan_x_px, pan_y_px) = {
+                        let cached = match self.page_image.as_ref() {
+                            Some(cached) => cached,
+                            None => {
+                                self.current_text = Some("no image cached".to_string());
+                                self.current_image = None;
+                                self.last_error = None;
+                                self.render_key = Some(key);
+                                return;
+                            }
+                        };
+                        build_viewport_image(
+                            cached.image.as_ref(),
+                            viewport_w_px,
+                            viewport_h_px,
+                            self.image_pan_x_px,
+                            self.image_pan_y_px,
+                        )
+                    };
+                    let viewport_ms = viewport_start.elapsed().as_millis();
+                    self.image_pan_x_px = pan_x_px;
+                    self.image_pan_y_px = pan_y_px;
+
+                    const MAX_KITTY_TRANSMIT_PIXELS: u64 = 1_250_000;
+                    let (transmit_image, transmit_px) = {
+                        let px = u64::from(view_image.width())
+                            .saturating_mul(u64::from(view_image.height()));
+                        if image_protocol::in_kitty_env() && px > MAX_KITTY_TRANSMIT_PIXELS {
+                            let scale = (MAX_KITTY_TRANSMIT_PIXELS as f64 / px.max(1) as f64)
+                                .sqrt()
+                                .clamp(0.01, 1.0);
+                            let new_w =
+                                ((view_image.width() as f64) * scale).round().max(1.0) as u32;
+                            let new_h =
+                                ((view_image.height() as f64) * scale).round().max(1.0) as u32;
+                            let downscale_start = Instant::now();
+                            let resized = view_image.resize_exact(
+                                new_w,
+                                new_h,
+                                image::imageops::FilterType::Triangle,
+                            );
+                            downscale_ms = downscale_start.elapsed().as_millis();
+                            (resized, (new_w, new_h))
+                        } else {
+                            let w = view_image.width();
+                            let h = view_image.height();
+                            (view_image, (w, h))
+                        }
+                    };
+
+                    let proto = if image_protocol::in_kitty_env() {
+                        let cols = u16::try_from(
+                            (transmit_px.0.saturating_add(u32::from(font_w_px).saturating_sub(1)))
+                                / u32::from(font_w_px),
+                        )
+                        .unwrap_or(width)
+                        .max(1)
+                        .min(width);
+                        let rows = u16::try_from(
+                            (transmit_px.1.saturating_add(u32::from(font_h_px).saturating_sub(1)))
+                                / u32::from(font_h_px),
+                        )
+                        .unwrap_or(height)
+                        .max(1)
+                        .min(height);
+                        let kitty_area = Rect::new(0, 0, cols, rows);
+
+                        let id = self.next_kitty_image_id;
+                        self.next_kitty_image_id = self.next_kitty_image_id.wrapping_add(1).max(1);
+                        let is_tmux = std::env::var_os("TMUX").is_some();
+                        Kitty::new(transmit_image, kitty_area, id, is_tmux).map(ImageProtocol::Kitty)
+                    } else {
+                        picker.new_protocol(transmit_image, size, Resize::Fit(None))
+                    };
+                    (proto, viewport_ms, transmit_px)
                 };
 
-                self.image_pan_x_px = pan_x_px;
-                self.image_pan_y_px = pan_y_px;
-
-                let size = Rect::new(0, 0, width, height);
-                match picker.new_protocol(view_image, size, Resize::Fit(None)) {
+                match protocol_result {
                     Ok(protocol) => {
+                        let protocol_ms = protocol_start.elapsed().as_millis();
                         self.current_text = None;
                         self.current_image = Some(protocol);
                         self.last_error = None;
+                        self.last_image_timings = Some(ReaderImageTimings {
+                            total_ms: total_start.elapsed().as_millis(),
+                            rasterize_ms,
+                            viewport_ms,
+                            downscale_ms,
+                            protocol_ms,
+                            viewport_px: (viewport_w_px, viewport_h_px),
+                            transmit_px,
+                            render_width_px,
+                        });
                     }
                     Err(err) => {
                         let fallback = engine
                             .render_page_text(&book, self.page)
                             .unwrap_or_else(|_| "no text found".to_string());
+                        let protocol_ms = protocol_start.elapsed().as_millis();
                         self.current_text = Some(format!(
                             "(image protocol failed; showing text)\n(error: {err})\n\n{fallback}"
                         ));
                         self.current_image = None;
                         self.last_error = None;
+                        self.last_image_timings = Some(ReaderImageTimings {
+                            total_ms: total_start.elapsed().as_millis(),
+                            rasterize_ms,
+                            viewport_ms,
+                            downscale_ms,
+                            protocol_ms,
+                            viewport_px: (viewport_w_px, viewport_h_px),
+                            transmit_px,
+                            render_width_px,
+                        });
                     }
                 }
             }
@@ -2690,11 +2909,13 @@ impl ReaderPanel {
                     self.current_text = Some(text);
                     self.current_image = None;
                     self.last_error = None;
+                    self.last_image_timings = None;
                 }
                 Err(err) => {
                     self.current_text = None;
                     self.current_image = None;
                     self.last_error = Some(err.to_string());
+                    self.last_image_timings = None;
                 }
             },
         }

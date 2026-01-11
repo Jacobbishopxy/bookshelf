@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
-pub(crate) fn spawn_kitty_with_current_exe() -> anyhow::Result<()> {
+pub(crate) fn spawn_kitty_with_current_exe() -> anyhow::Result<Child> {
     let exe = std::env::current_exe()?;
     spawn_kitty(exe, None)
 }
@@ -9,7 +9,7 @@ pub(crate) fn spawn_kitty_with_current_exe() -> anyhow::Result<()> {
 pub(crate) fn spawn_kitty_reader_with_current_exe(
     book_path: &str,
     page_index: u32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Child> {
     let exe = std::env::current_exe()?;
     spawn_kitty(
         exe,
@@ -25,7 +25,7 @@ struct ReaderBootstrap<'a> {
     page_index: u32,
 }
 
-fn spawn_kitty(exe: PathBuf, reader: Option<ReaderBootstrap<'_>>) -> anyhow::Result<()> {
+fn spawn_kitty(exe: PathBuf, reader: Option<ReaderBootstrap<'_>>) -> anyhow::Result<Child> {
     let kitty = find_kitty_executable().ok_or_else(|| anyhow::anyhow!("`kitty` not found on PATH"))?;
 
     let mut cmd = Command::new(kitty);
@@ -50,7 +50,7 @@ fn spawn_kitty(exe: PathBuf, reader: Option<ReaderBootstrap<'_>>) -> anyhow::Res
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    cmd.spawn().map(|_| ()).map_err(Into::into)
+    cmd.spawn().map_err(Into::into)
 }
 
 fn find_kitty_executable() -> Option<PathBuf> {

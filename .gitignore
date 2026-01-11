@@ -1,6 +1,8 @@
 /target
 .vscode
 tmp*
+.bookshelf/
+bookshelf.db
 
 .cargo-home/
 .pdfium/

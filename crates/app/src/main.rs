@@ -7,7 +7,6 @@ use bookshelf_application::AppContext;
 use bookshelf_core::{Book, ScanScope, Settings, encode_path};
 use bookshelf_storage::Storage;
 use bookshelf_ui::{Ui, UiExit};
-use directories::ProjectDirs;
 
 fn main() {
     if std::env::args_os()
@@ -36,19 +35,15 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
-    let project_dirs =
-        ProjectDirs::from("dev", "xiey", "bookshelf").context("resolve project dirs")?;
+    let cwd = std::env::current_dir().context("get cwd")?;
+    let cwd_str = cwd.to_string_lossy().to_string();
 
-    let config_dir = project_dirs.config_dir();
-    fs::create_dir_all(config_dir)
-        .with_context(|| format!("create config dir {}", config_dir.display()))?;
-
-    let db_path = config_dir.join("bookshelf.db");
+    let db_dir = cwd.join(".bookshelf");
+    fs::create_dir_all(&db_dir).with_context(|| format!("create db dir {}", db_dir.display()))?;
+    let db_path = db_dir.join("bookshelf.db");
     let storage = Storage::open(&db_path)?;
     let mut settings = storage.load_settings()?;
 
-    let cwd = std::env::current_dir().context("get cwd")?;
-    let cwd_str = cwd.to_string_lossy().to_string();
     if settings.library_roots.is_empty() {
         settings.library_roots.push(cwd_str.clone());
         settings.normalize();

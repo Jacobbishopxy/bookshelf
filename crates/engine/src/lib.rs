@@ -673,6 +673,27 @@ impl Engine {
         })
     }
 
+    pub fn page_size_points(&self, book: &Book, page_index: u32) -> anyhow::Result<(f32, f32)> {
+        if self.pdfium_disabled() {
+            anyhow::bail!("pdfium disabled via BOOKSHELF_DISABLE_PDFIUM");
+        }
+
+        let pdfium = self.pdfium()?;
+        let path = bookshelf_core::decode_path(&book.path);
+        let document = pdfium
+            .load_pdf_from_file(&path, None)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        let page_index =
+            u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
+        let page = document
+            .pages()
+            .get(page_index)
+            .map_err(|err| anyhow::anyhow!(err))?;
+
+        Ok((page.width().value, page.height().value))
+    }
+
     fn pdfium(&self) -> anyhow::Result<Ref<'_, Pdfium>> {
         let init_error = {
             let mut state = self.pdfium.borrow_mut();
