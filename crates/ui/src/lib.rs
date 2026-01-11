@@ -25,6 +25,9 @@ use ratatui::widgets::{
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol as ImageProtocol;
 use ratatui_image::{Image as ImageWidget, Resize};
+
+mod image_protocol;
+mod kitty_spawn;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +53,8 @@ pub struct Ui {
     notes_panel: NotesPanel,
     toc_panel: TocPanel,
     reader: ReaderPanel,
+    boot_reader_session: bool,
+    ignore_next_esc_quit: bool,
     engine: Engine,
     image_picker: Picker,
     meta_cache: BookMetaCache,
@@ -69,7 +74,7 @@ impl Ui {
         let reader = ReaderPanel::default();
         let meta_cache = BookMetaCache::default();
         let image_picker = Picker::halfblocks();
-        Self {
+        let mut ui = Self {
             ctx,
             settings_panel,
             preview_panel,
@@ -80,15 +85,27 @@ impl Ui {
             notes_panel,
             toc_panel,
             reader,
+            boot_reader_session: false,
+            ignore_next_esc_quit: false,
             engine: Engine::new(),
             image_picker,
             meta_cache,
-        }
+        };
+        ui.bootstrap_reader_from_env();
+        ui
     }
 
     pub fn run(&mut self) -> anyhow::Result<UiOutcome> {
         let mut terminal = setup_terminal()?;
-        self.image_picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        image_protocol::ensure_tmux_allow_passthrough();
+        self.image_picker = if image_protocol::in_kitty_env() {
+            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        } else {
+            Picker::halfblocks()
+        };
+        self.image_picker
+            .set_background_color(image::Rgba([255u8, 255u8, 255u8, 255u8]));
+        image_protocol::prefer_kitty_if_supported(&mut self.image_picker);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.event_loop(&mut terminal)
         }));
@@ -102,6 +119,70 @@ impl Ui {
                 "{}\n(additionally failed to restore terminal: {err})",
                 panic_to_string(panic)
             )),
+        }
+    }
+
+    fn bootstrap_reader_from_env(&mut self) {
+        let boot = std::env::var("BOOKSHELF_BOOT_READER")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty() && v.trim() != "0");
+        if !boot {
+            return;
+        }
+        self.boot_reader_session = true;
+
+        let Some(path) = std::env::var("BOOKSHELF_BOOT_READER_PATH").ok() else {
+            return;
+        };
+
+        let page_index = std::env::var("BOOKSHELF_BOOT_READER_PAGE_INDEX")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+
+        let mode = std::env::var("BOOKSHELF_BOOT_READER_MODE").ok();
+        if let Some(mode) = mode {
+            if mode.trim().eq_ignore_ascii_case("image") {
+                self.ctx.settings.reader_mode = ReaderMode::Image;
+            } else if mode.trim().eq_ignore_ascii_case("text") {
+                self.ctx.settings.reader_mode = ReaderMode::Text;
+            }
+        }
+
+        let book = self
+            .ctx
+            .books
+            .iter()
+            .find(|b| b.path == path)
+            .cloned()
+            .unwrap_or_else(|| {
+                let decoded = bookshelf_core::decode_path(&path);
+                let title = decoded
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "untitled".to_string());
+                bookshelf_core::Book {
+                    path: path.clone(),
+                    title,
+                    last_opened: None,
+                }
+            });
+
+        self.reader.open_book(&book, &self.ctx, &self.engine);
+        self.reader.page = page_index;
+        if let Some(total) = self.reader.total_pages
+            && total > 0
+        {
+            self.reader.page = self.reader.page.min(total - 1);
+        }
+        self.reader.invalidate_render();
+
+        // Best effort: clear env so we don't re-bootstrap on subsequent UI restarts.
+        unsafe {
+            std::env::remove_var("BOOKSHELF_BOOT_READER");
+            std::env::remove_var("BOOKSHELF_BOOT_READER_PATH");
+            std::env::remove_var("BOOKSHELF_BOOT_READER_PAGE_INDEX");
+            std::env::remove_var("BOOKSHELF_BOOT_READER_MODE");
         }
     }
 
@@ -196,7 +277,13 @@ impl Ui {
 
     fn handle_main_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
         match key.code {
-            KeyCode::Esc => Ok(Some(UiExit::Quit)),
+            KeyCode::Esc => {
+                if self.boot_reader_session && self.ignore_next_esc_quit {
+                    self.ignore_next_esc_quit = false;
+                    return Ok(None);
+                }
+                Ok(Some(UiExit::Quit))
+            }
             KeyCode::Char('/') => {
                 self.search_panel.open = true;
                 self.normalize_selection_to_visible();
@@ -296,6 +383,9 @@ impl Ui {
                 self.bookmarks_panel = BookmarksPanel::default();
                 self.notes_panel = NotesPanel::default();
                 self.toc_panel = TocPanel::default();
+                if self.boot_reader_session {
+                    self.ignore_next_esc_quit = true;
+                }
                 Ok(None)
             }
             KeyCode::Char('g') => {
@@ -320,7 +410,15 @@ impl Ui {
                         "bookshelf-reader-debug-{id:016x}-p{}.txt",
                         self.reader.page + 1
                     ));
-                    let debug = self.engine.debug_page_text(&book, self.reader.page)?;
+                    let term = std::env::var("TERM").unwrap_or_default();
+                    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+                    let tmux = std::env::var("TMUX").unwrap_or_default();
+                    let kitty_window_id = std::env::var("KITTY_WINDOW_ID").unwrap_or_default();
+                    let (font_w, font_h) = self.image_picker.font_size();
+                    let debug = format!(
+                        "env:\n  TERM={term}\n  TERM_PROGRAM={term_program}\n  TMUX={tmux}\n  KITTY_WINDOW_ID={kitty_window_id}\n\nratatui-image:\n  font_size_px={font_w}x{font_h}\n\n-----\n\n{}",
+                        self.engine.debug_page_text(&book, self.reader.page)?
+                    );
                     std::fs::write(&path, debug)?;
                     self.reader.notice = Some(format!("wrote {}", path.display()));
                 }
@@ -348,9 +446,30 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Char('m') => {
-                self.ctx.settings.cycle_reader_mode();
-                self.reader.invalidate_render();
-                self.reader.notice = Some(format!("mode: {}", self.ctx.settings.reader_mode));
+                match self.ctx.settings.reader_mode {
+                    ReaderMode::Text => {
+                        if image_protocol::kitty_supported(&self.image_picker) {
+                            self.ctx.settings.reader_mode = ReaderMode::Image;
+                            self.reader.invalidate_render();
+                            self.reader.notice = Some("mode: image (kitty)".to_string());
+                        } else {
+                            self.ctx.settings.reader_mode = ReaderMode::Text;
+                            let in_tmux = std::env::var_os("TMUX").is_some();
+                            self.reader.notice = Some(if in_tmux {
+                                "image mode needs kitty + tmux allow-passthrough; press k to open kitty reader"
+                                    .to_string()
+                            } else {
+                                "image mode requires kitty graphics; press k to open kitty reader"
+                                    .to_string()
+                            });
+                        }
+                    }
+                    ReaderMode::Image => {
+                        self.ctx.settings.reader_mode = ReaderMode::Text;
+                        self.reader.invalidate_render();
+                        self.reader.notice = Some("mode: text".to_string());
+                    }
+                }
                 Ok(None)
             }
             KeyCode::Left => {
@@ -424,6 +543,16 @@ impl Ui {
             KeyCode::Char('k') => {
                 if self.ctx.settings.reader_mode == ReaderMode::Image {
                     self.reader.pan_image_by_cells(&self.image_picker, 0, -5);
+                } else if !image_protocol::kitty_supported(&self.image_picker) {
+                    let spawned = if let Some(path) = self.reader.book_path.as_deref() {
+                        kitty_spawn::spawn_kitty_reader_with_current_exe(path, self.reader.page)
+                    } else {
+                        kitty_spawn::spawn_kitty_with_current_exe()
+                    };
+                    match spawned {
+                        Ok(()) => self.reader.notice = Some("spawned kitty reader".to_string()),
+                        Err(err) => self.reader.notice = Some(format!("kitty spawn failed: {err}")),
+                    }
                 }
                 Ok(None)
             }
@@ -1512,6 +1641,17 @@ impl Ui {
     }
 
     fn draw_reader(&mut self, area: Rect, frame: &mut ratatui::Frame) {
+        if self.ctx.settings.reader_mode == ReaderMode::Image
+            && !image_protocol::kitty_supported(&self.image_picker)
+        {
+            self.ctx.settings.reader_mode = ReaderMode::Text;
+            self.reader.current_image = None;
+            self.reader.render_key = None;
+            self.reader.notice = Some(
+                "kitty graphics protocol not detected; image mode disabled".to_string(),
+            );
+        }
+
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1523,7 +1663,13 @@ impl Ui {
 
         let mode_text = match self.ctx.settings.reader_mode {
             ReaderMode::Text => "text".to_string(),
-            ReaderMode::Image => format!("image {}%", self.reader.image_zoom_percent),
+            ReaderMode::Image => {
+                let (fw, fh) = self.image_picker.font_size();
+                format!(
+                    "image kitty {}% (cell {}x{}px)",
+                    self.reader.image_zoom_percent, fw, fh
+                )
+            }
         };
 
         let title_text = match (&self.reader.book_title, self.reader.total_pages) {
@@ -1548,6 +1694,10 @@ impl Ui {
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(header, layout[0]);
+
+        if self.ctx.settings.reader_mode == ReaderMode::Image {
+            image_protocol::prefer_kitty_if_supported(&mut self.image_picker);
+        }
 
         let inner_width = layout[1].width.saturating_sub(2);
         let inner_height = layout[1].height.saturating_sub(2);
@@ -1632,11 +1782,30 @@ impl Ui {
             Span::raw(" bookmarks  "),
             Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" notes  "),
-            Span::styled("m", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" mode  "),
             Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" dump"),
         ];
+
+        let kitty_ok = image_protocol::kitty_supported(&self.image_picker);
+        if self.ctx.settings.reader_mode == ReaderMode::Image || kitty_ok {
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                "m",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" mode"));
+        }
+
+        if self.ctx.settings.reader_mode == ReaderMode::Text
+            && !kitty_ok
+        {
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                "k",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" kitty-reader"));
+        }
 
         if self.ctx.settings.reader_mode == ReaderMode::Image {
             footer_spans.push(Span::raw("  "));
