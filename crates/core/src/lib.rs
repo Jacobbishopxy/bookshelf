@@ -95,23 +95,9 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub preview_mode: PreviewMode,
     pub reader_mode: ReaderMode,
-    pub preview_depth: usize,
-    pub preview_pages: usize,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
-}
-
-pub const MAX_PREVIEW_DEPTH: usize = 200;
-pub const MAX_PREVIEW_PAGES: usize = 50;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PreviewMode {
-    Text,
-    Braille,
-    Blocks,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,35 +112,6 @@ pub enum ReaderMode {
 pub enum ScanScope {
     Direct,
     Recursive,
-}
-
-impl PreviewMode {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            PreviewMode::Text => "text",
-            PreviewMode::Braille => "braille",
-            PreviewMode::Blocks => "blocks",
-        }
-    }
-}
-
-impl std::fmt::Display for PreviewMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for PreviewMode {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "text" => Ok(PreviewMode::Text),
-            "braille" => Ok(PreviewMode::Braille),
-            "blocks" => Ok(PreviewMode::Blocks),
-            _ => Err("unknown preview mode"),
-        }
-    }
 }
 
 impl ReaderMode {
@@ -214,10 +171,7 @@ impl std::str::FromStr for ScanScope {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            preview_mode: PreviewMode::Text,
             reader_mode: ReaderMode::Text,
-            preview_depth: 5,
-            preview_pages: 2,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
         }
@@ -226,8 +180,6 @@ impl Default for Settings {
 
 impl Settings {
     pub fn normalize(&mut self) {
-        self.preview_depth = self.preview_depth.clamp(1, MAX_PREVIEW_DEPTH);
-        self.preview_pages = self.preview_pages.clamp(1, MAX_PREVIEW_PAGES);
         self.library_roots = self
             .library_roots
             .iter()
@@ -236,14 +188,6 @@ impl Settings {
             .collect();
         self.library_roots.sort();
         self.library_roots.dedup();
-    }
-
-    pub fn cycle_preview_mode(&mut self) {
-        self.preview_mode = match self.preview_mode {
-            PreviewMode::Text => PreviewMode::Braille,
-            PreviewMode::Braille => PreviewMode::Blocks,
-            PreviewMode::Blocks => PreviewMode::Text,
-        };
     }
 
     pub fn cycle_reader_mode(&mut self) {
@@ -309,13 +253,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_use_preview_depth() {
-        let settings = Settings::default();
-        assert!(settings.preview_depth > 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn non_utf8_paths_roundtrip_through_encoding() {
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStrExt as _;
@@ -326,33 +263,6 @@ mod tests {
         let encoded = encode_path(&original_path);
         let decoded = decode_path(&encoded);
         assert_eq!(decoded.as_os_str().as_bytes(), original.as_bytes());
-    }
-
-    #[test]
-    fn cycle_preview_mode_rotates() {
-        let mut settings = Settings::default();
-        assert_eq!(settings.preview_mode, PreviewMode::Text);
-        settings.cycle_preview_mode();
-        assert_eq!(settings.preview_mode, PreviewMode::Braille);
-        settings.cycle_preview_mode();
-        assert_eq!(settings.preview_mode, PreviewMode::Blocks);
-        settings.cycle_preview_mode();
-        assert_eq!(settings.preview_mode, PreviewMode::Text);
-    }
-
-    #[test]
-    fn preview_mode_parses_strings() {
-        assert_eq!("text".parse::<PreviewMode>().unwrap(), PreviewMode::Text);
-        assert_eq!(
-            "Braille".parse::<PreviewMode>().unwrap(),
-            PreviewMode::Braille
-        );
-        assert_eq!(
-            " BLOCKS ".parse::<PreviewMode>().unwrap(),
-            PreviewMode::Blocks
-        );
-        assert!("nope".parse::<PreviewMode>().is_err());
-        assert!("image".parse::<PreviewMode>().is_err());
     }
 
     #[test]
@@ -385,11 +295,8 @@ mod tests {
     #[test]
     fn settings_normalizes_depth() {
         let mut settings = Settings {
-            preview_mode: PreviewMode::Text,
             reader_mode: ReaderMode::Text,
-            preview_depth: 0,
             scan_scope: ScanScope::Direct,
-            preview_pages: 0,
             library_roots: vec![
                 " ".to_string(),
                 "/a".to_string(),
@@ -398,8 +305,6 @@ mod tests {
             ],
         };
         settings.normalize();
-        assert_eq!(settings.preview_depth, 1);
-        assert_eq!(settings.preview_pages, 1);
         assert_eq!(
             settings.library_roots,
             vec!["/a".to_string(), "/b".to_string()]

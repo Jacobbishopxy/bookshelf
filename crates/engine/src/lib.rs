@@ -4,10 +4,8 @@ use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use anyhow::Context as _;
-use bookshelf_core::{Book, PreviewMode, ReaderMode, Settings, TocItem};
+use bookshelf_core::{Book, ReaderMode, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
 use pdf::font::ToUnicodeMap;
@@ -17,9 +15,6 @@ use pdf::object::{
 };
 use pdf::primitive::{Name, PdfString, Primitive};
 use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
-
-mod pdfium_worker;
-pub use pdfium_worker::run_pdfium_worker_from_env;
 
 #[derive(Debug, Default)]
 pub struct Engine {
@@ -42,50 +37,6 @@ impl Engine {
     pub fn check_pdfium(&self) -> anyhow::Result<()> {
         let _ = self.pdfium()?;
         Ok(())
-    }
-
-    pub fn preview_depth(&self, settings: &Settings) -> usize {
-        settings.preview_depth
-    }
-
-    pub fn render_preview_for(&self, book: &Book, settings: &Settings, width_chars: u16) -> String {
-        match settings.preview_mode {
-            PreviewMode::Text => match self.render_text_preview(book, settings) {
-                Ok(text) => text,
-                Err(err) => format!("(error reading pdf: {err})"),
-            },
-            PreviewMode::Braille | PreviewMode::Blocks => {
-                if self.pdfium_disabled() {
-                    return match self.render_text_preview(book, settings) {
-                        Ok(text) => format!(
-                            "(pdfium disabled via BOOKSHELF_DISABLE_PDFIUM; showing text preview)\n\n{text}"
-                        ),
-                        Err(err) => format!("(error reading pdf: {err})"),
-                    };
-                }
-                match self.render_page_thumbnail(
-                    book,
-                    0,
-                    settings.preview_mode,
-                    width_chars,
-                    settings.preview_depth.max(1) as u16,
-                ) {
-                    Ok(text) => text,
-                    Err(err) => {
-                        if self.pdfium_unavailable() {
-                            match self.render_text_preview(book, settings) {
-                                Ok(text) => format!(
-                                    "(pdfium not available; showing text preview)\n\n{text}"
-                                ),
-                                Err(_) => format!("(error rendering pdf: {err})"),
-                            }
-                        } else {
-                            format!("(error rendering pdf: {err})")
-                        }
-                    }
-                }
-            }
-        }
     }
 
     pub fn page_count(&self, book: &Book) -> anyhow::Result<u32> {
@@ -369,241 +320,6 @@ impl Engine {
         }
     }
 
-    fn render_page_thumbnail(
-        &self,
-        book: &Book,
-        page_index: u32,
-        mode: PreviewMode,
-        width_chars: u16,
-        height_chars: u16,
-    ) -> anyhow::Result<String> {
-        match mode {
-            PreviewMode::Text => self.render_page_text(book, page_index),
-            PreviewMode::Braille | PreviewMode::Blocks => {
-                self.render_page_raster(book, page_index, mode, width_chars, height_chars.max(1))
-            }
-        }
-    }
-
-    fn render_page_raster(
-        &self,
-        book: &Book,
-        page_index: u32,
-        mode: PreviewMode,
-        width_chars: u16,
-        max_height_chars: u16,
-    ) -> anyhow::Result<String> {
-        if self.should_isolate_pdfium(mode) {
-            match self.render_page_raster_isolated(
-                book,
-                page_index,
-                mode,
-                width_chars,
-                max_height_chars,
-            ) {
-                Ok(text) => return Ok(text),
-                Err(err) => return Err(err),
-            }
-        }
-
-        self.render_page_raster_in_process(book, page_index, mode, width_chars, max_height_chars)
-    }
-
-    fn render_page_raster_in_process(
-        &self,
-        book: &Book,
-        page_index: u32,
-        mode: PreviewMode,
-        width_chars: u16,
-        max_height_chars: u16,
-    ) -> anyhow::Result<String> {
-        let width_chars = width_chars.max(1) as usize;
-        let max_height_chars = max_height_chars.max(1) as usize;
-
-        let (cell_w, cell_h) = match mode {
-            PreviewMode::Braille => (2usize, 4usize),
-            PreviewMode::Blocks => (2usize, 4usize),
-            PreviewMode::Text => anyhow::bail!("text mode does not use raster rendering"),
-        };
-
-        let pixel_width = (width_chars.saturating_mul(cell_w))
-            .try_into()
-            .unwrap_or(i32::MAX);
-        let pixel_max_height = (max_height_chars.saturating_mul(cell_h))
-            .try_into()
-            .unwrap_or(i32::MAX);
-
-        let bitmap =
-            self.render_page_bitmap_gray(book, page_index, pixel_width, pixel_max_height)?;
-
-        let out_width = div_ceil(bitmap.width, cell_w).min(width_chars);
-        let out_height = div_ceil(bitmap.height, cell_h).min(max_height_chars);
-
-        let mut out = String::new();
-        for row in 0..out_height {
-            if row > 0 {
-                out.push('\n');
-            }
-
-            match mode {
-                PreviewMode::Braille => {
-                    for col in 0..out_width {
-                        out.push(braille_cell(&bitmap, col * cell_w, row * cell_h));
-                    }
-                }
-                PreviewMode::Blocks => {
-                    for col in 0..out_width {
-                        out.push(blocks_cell(&bitmap, col * cell_w, row * cell_h));
-                    }
-                }
-                PreviewMode::Text => {}
-            }
-        }
-
-        Ok(out)
-    }
-
-    fn should_isolate_pdfium(&self, mode: PreviewMode) -> bool {
-        const PDFIUM_ISOLATE_ENV: &str = "BOOKSHELF_PDFIUM_ISOLATE";
-        const PDFIUM_WORKER_ENV: &str = "BOOKSHELF_PDFIUM_WORKER";
-        const PDFIUM_WORKER_EXE_ENV: &str = "BOOKSHELF_PDFIUM_WORKER_EXE";
-
-        if matches!(mode, PreviewMode::Text) {
-            return false;
-        }
-
-        if self.pdfium_disabled() {
-            return false;
-        }
-
-        if std::env::var_os(PDFIUM_WORKER_ENV).is_some() {
-            return false;
-        }
-
-        let isolate = std::env::var(PDFIUM_ISOLATE_ENV)
-            .map(|v| !v.trim().is_empty() && v.trim() != "0")
-            .unwrap_or(true);
-        if !isolate {
-            return false;
-        }
-
-        std::env::var_os(PDFIUM_WORKER_EXE_ENV).is_some()
-    }
-
-    fn render_page_raster_isolated(
-        &self,
-        book: &Book,
-        page_index: u32,
-        mode: PreviewMode,
-        width_chars: u16,
-        max_height_chars: u16,
-    ) -> anyhow::Result<String> {
-        const PDFIUM_ISOLATE_ENV: &str = "BOOKSHELF_PDFIUM_ISOLATE";
-        const PDFIUM_WORKER_ENV: &str = "BOOKSHELF_PDFIUM_WORKER";
-        const PDFIUM_WORKER_EXE_ENV: &str = "BOOKSHELF_PDFIUM_WORKER_EXE";
-
-        let exe = std::env::var_os(PDFIUM_WORKER_EXE_ENV)
-            .ok_or_else(|| anyhow::anyhow!("{PDFIUM_WORKER_EXE_ENV} not set"))?;
-
-        let mode_str = match mode {
-            PreviewMode::Braille => "braille",
-            PreviewMode::Blocks => "blocks",
-            PreviewMode::Text => anyhow::bail!("text mode does not use raster rendering"),
-        };
-
-        let pdf_path = bookshelf_core::decode_path(&book.path);
-
-        let output = Command::new(exe)
-            .arg("--pdfium-worker")
-            .arg("--pdf")
-            .arg(pdf_path.as_os_str())
-            .arg("--page-index")
-            .arg(page_index.to_string())
-            .arg("--mode")
-            .arg(mode_str)
-            .arg("--width-chars")
-            .arg(width_chars.to_string())
-            .arg("--max-height-chars")
-            .arg(max_height_chars.to_string())
-            .env(PDFIUM_WORKER_ENV, "1")
-            .env(PDFIUM_ISOLATE_ENV, "0")
-            .output()
-            .with_context(|| "spawn pdfium worker")?;
-
-        if output.status.success() {
-            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt as _;
-            if let Some(signal) = output.status.signal() {
-                anyhow::bail!(
-                    "pdfium worker terminated by signal {signal}\n{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-
-        anyhow::bail!(
-            "pdfium worker failed: {}\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        )
-    }
-
-    fn render_page_bitmap_gray(
-        &self,
-        book: &Book,
-        page_index: u32,
-        target_width: i32,
-        max_height: i32,
-    ) -> anyhow::Result<GrayBitmap> {
-        let pdfium = self.pdfium()?;
-        let path = bookshelf_core::decode_path(&book.path);
-        let document = pdfium
-            .load_pdf_from_file(&path, None)
-            .map_err(|err| anyhow::anyhow!(err))?;
-
-        let page_index =
-            u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
-        let page = document
-            .pages()
-            .get(page_index)
-            .map_err(|err| anyhow::anyhow!(err))?;
-
-        let render_config = PdfRenderConfig::new()
-            .set_target_width(target_width.max(1))
-            .set_maximum_width(target_width.max(1))
-            .set_maximum_height(max_height.max(1))
-            .render_form_data(false)
-            .render_annotations(false)
-            .use_grayscale_rendering(true)
-            .set_reverse_byte_order(false)
-            .set_format(PdfBitmapFormat::Gray);
-
-        let bitmap = page
-            .render_with_config(&render_config)
-            .map_err(|err| anyhow::anyhow!(err))?;
-
-        let width = bitmap.width().max(0) as usize;
-        let height = bitmap.height().max(0) as usize;
-        let pixels = bitmap.as_raw_bytes();
-
-        let stride = if height == 0 {
-            0
-        } else {
-            pixels.len() / height
-        };
-
-        Ok(GrayBitmap {
-            width,
-            height,
-            stride,
-            pixels,
-        })
-    }
-
     pub fn render_page_bitmap_rgba(
         &self,
         book: &Book,
@@ -729,86 +445,10 @@ impl Engine {
         }
     }
 
-    fn pdfium_unavailable(&self) -> bool {
-        matches!(&*self.pdfium.borrow(), PdfiumState::Unavailable(_))
-    }
-
     fn pdfium_disabled(&self) -> bool {
         std::env::var("BOOKSHELF_DISABLE_PDFIUM")
             .map(|v| !v.trim().is_empty() && v.trim() != "0")
             .unwrap_or(false)
-    }
-
-    fn render_text_preview(&self, book: &Book, settings: &Settings) -> anyhow::Result<String> {
-        let path = bookshelf_core::decode_path(&book.path);
-        let file = FileOptions::cached().open(path)?;
-        let resolver = file.resolver();
-
-        let mut out = String::new();
-        let mut any_text = false;
-        let max_pages = settings.preview_pages.max(1);
-        let max_lines = settings.preview_depth.max(1);
-
-        for (idx, page_res) in file.pages().take(max_pages).enumerate() {
-            let page = match page_res {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let Some(content) = &page.contents else {
-                continue;
-            };
-
-            let ops = match content.operations(&resolver) {
-                Ok(ops) => ops,
-                Err(_) => continue,
-            };
-
-            let resources = match page.resources() {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let text = ops_to_text(&ops, &resolver, resources);
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-
-            any_text = true;
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(&format!("--- Page {} ---\n", idx + 1));
-            out.push_str(&text);
-
-            if out.lines().count() >= max_lines {
-                break;
-            }
-        }
-
-        if !any_text {
-            Ok("no text found".to_string())
-        } else {
-            Ok(out.lines().take(max_lines).collect::<Vec<_>>().join("\n"))
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct GrayBitmap {
-    width: usize,
-    height: usize,
-    stride: usize,
-    pixels: Vec<u8>,
-}
-
-impl GrayBitmap {
-    fn get(&self, x: usize, y: usize) -> u8 {
-        if x >= self.width || y >= self.height {
-            return 255;
-        }
-        let idx = y.saturating_mul(self.stride).saturating_add(x);
-        self.pixels.get(idx).copied().unwrap_or(255)
     }
 }
 
@@ -818,64 +458,6 @@ pub struct RgbaBitmap {
     pub height: usize,
     pub stride: usize,
     pub pixels: Vec<u8>,
-}
-
-fn div_ceil(value: usize, divisor: usize) -> usize {
-    if divisor == 0 {
-        return 0;
-    }
-    value.div_ceil(divisor)
-}
-
-fn braille_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
-    const THRESHOLD: u8 = 200;
-
-    let mut bits = 0u8;
-    for dy in 0..4 {
-        for dx in 0..2 {
-            let pixel = bitmap.get(x0 + dx, y0 + dy);
-            if pixel >= THRESHOLD {
-                continue;
-            }
-
-            let bit = match (dx, dy) {
-                (0, 0) => 0x01,
-                (0, 1) => 0x02,
-                (0, 2) => 0x04,
-                (0, 3) => 0x40,
-                (1, 0) => 0x08,
-                (1, 1) => 0x10,
-                (1, 2) => 0x20,
-                (1, 3) => 0x80,
-                _ => 0,
-            };
-            bits |= bit;
-        }
-    }
-
-    char::from_u32(0x2800 + bits as u32).unwrap_or(' ')
-}
-
-fn blocks_cell(bitmap: &GrayBitmap, x0: usize, y0: usize) -> char {
-    let mut sum = 0u32;
-    let mut count = 0u32;
-    for dy in 0..4 {
-        for dx in 0..2 {
-            sum += bitmap.get(x0 + dx, y0 + dy) as u32;
-            count += 1;
-        }
-    }
-
-    let avg = if count == 0 { 255 } else { (sum / count) as u8 };
-    let darkness = 255u8.saturating_sub(avg);
-
-    match darkness {
-        0..=31 => ' ',
-        32..=95 => '░',
-        96..=159 => '▒',
-        160..=223 => '▓',
-        _ => '█',
-    }
 }
 
 fn bind_pdfium() -> anyhow::Result<Pdfium> {
@@ -1178,52 +760,6 @@ fn is_noncharacter(code: u32) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
-
-    #[test]
-    fn propagates_preview_depth() {
-        let settings = Settings {
-            preview_mode: PreviewMode::Text,
-            preview_depth: 8,
-            ..Settings::default()
-        };
-        let engine = Engine::new();
-        assert_eq!(engine.preview_depth(&settings), 8);
-    }
-
-    #[test]
-    fn braille_cell_renders_dots() {
-        let bitmap = GrayBitmap {
-            width: 2,
-            height: 4,
-            stride: 2,
-            pixels: vec![
-                0, 255, //
-                255, 255, //
-                255, 255, //
-                255, 255, //
-            ],
-        };
-        assert_eq!(braille_cell(&bitmap, 0, 0), '⠁');
-    }
-
-    #[test]
-    fn blocks_cell_renders_shades() {
-        let white = GrayBitmap {
-            width: 2,
-            height: 4,
-            stride: 2,
-            pixels: vec![255; 8],
-        };
-        assert_eq!(blocks_cell(&white, 0, 0), ' ');
-
-        let black = GrayBitmap {
-            width: 2,
-            height: 4,
-            stride: 2,
-            pixels: vec![0; 8],
-        };
-        assert_eq!(blocks_cell(&black, 0, 0), '█');
-    }
 
     #[cfg(unix)]
     #[test]

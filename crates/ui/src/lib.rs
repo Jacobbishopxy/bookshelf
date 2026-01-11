@@ -1,8 +1,8 @@
 //! ratatui-based UI.
 
+use std::collections::VecDeque;
 use std::hash::Hasher;
 use std::io::{self, Stdout};
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +10,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{
-    Bookmark, MAX_PREVIEW_DEPTH, MAX_PREVIEW_PAGES, Note, ReaderMode, Settings, TocItem,
-};
+use bookshelf_core::{Bookmark, Note, ReaderMode, Settings, TocItem};
 use bookshelf_engine::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -26,8 +24,8 @@ use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::protocol::Protocol as ImageProtocol;
+use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::{Image as ImageWidget, Resize};
 
 mod image_protocol;
@@ -49,7 +47,6 @@ pub struct UiOutcome {
 pub struct Ui {
     ctx: AppContext,
     settings_panel: SettingsPanel,
-    preview_panel: PreviewPanel,
     scan_panel: ScanPathPanel,
     search_panel: SearchPanel,
     goto_panel: GotoPanel,
@@ -69,7 +66,6 @@ impl Ui {
     pub fn new(mut ctx: AppContext) -> Self {
         ctx.settings.normalize();
         let settings_panel = SettingsPanel::default();
-        let preview_panel = PreviewPanel::new(ctx.settings.clone());
         let scan_panel = ScanPathPanel::new(join_roots(&ctx.settings));
         let search_panel = SearchPanel::default();
         let goto_panel = GotoPanel::default();
@@ -82,7 +78,6 @@ impl Ui {
         let mut ui = Self {
             ctx,
             settings_panel,
-            preview_panel,
             scan_panel,
             search_panel,
             goto_panel,
@@ -290,13 +285,6 @@ impl Ui {
                         }
                     } else if self.scan_panel.open {
                         if let Some(exit) = self.handle_scan_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
-                    } else if self.preview_panel.open {
-                        if let Some(exit) = self.handle_preview_panel_key(key)? {
                             return Ok(UiOutcome {
                                 ctx: self.ctx.clone(),
                                 exit,
@@ -1000,99 +988,15 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Down => {
-                self.settings_panel.selected = (self.settings_panel.selected + 1).min(1);
+                self.settings_panel.selected = 0;
                 Ok(None)
             }
             KeyCode::Enter => {
-                match self.settings_panel.selected {
-                    0 => {
-                        self.scan_panel.open = true;
-                        self.scan_panel.selected = 0;
-                        self.scan_panel.input = join_roots(&self.ctx.settings);
-                        self.scan_panel.error = None;
-                    }
-                    1 => {
-                        self.preview_panel.open = true;
-                        self.preview_panel.draft = self.ctx.settings.clone();
-                        self.preview_panel.begin_editing();
-                    }
-                    _ => {}
-                }
+                self.scan_panel.open = true;
+                self.scan_panel.selected = 0;
+                self.scan_panel.input = join_roots(&self.ctx.settings);
+                self.scan_panel.error = None;
                 self.settings_panel.open = false;
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn handle_preview_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
-        match key.code {
-            KeyCode::Esc => {
-                self.preview_panel.open = false;
-                self.preview_panel.editing_numeric = false;
-                Ok(None)
-            }
-            KeyCode::Enter => {
-                self.preview_panel.reset_invalid_inputs();
-                self.preview_panel.sync_inputs_to_draft();
-                self.ctx.settings = self.preview_panel.draft.clone();
-                self.ctx.settings.normalize();
-                self.preview_panel.open = false;
-                self.preview_panel.editing_numeric = false;
-                Ok(None)
-            }
-            KeyCode::Up => {
-                self.preview_panel.selected = self.preview_panel.selected.saturating_sub(1);
-                self.preview_panel.editing_numeric = false;
-                self.preview_panel.reset_invalid_inputs();
-                Ok(None)
-            }
-            KeyCode::Down => {
-                self.preview_panel.selected = (self.preview_panel.selected + 1).min(2);
-                self.preview_panel.editing_numeric = false;
-                self.preview_panel.reset_invalid_inputs();
-                Ok(None)
-            }
-            KeyCode::Char('m') | KeyCode::Tab => {
-                if self.preview_panel.selected == 0 {
-                    self.preview_panel.draft.cycle_preview_mode();
-                }
-                Ok(None)
-            }
-            KeyCode::Left => {
-                if self.preview_panel.selected == 0 {
-                    self.preview_panel.draft.preview_mode = match self
-                        .preview_panel
-                        .draft
-                        .preview_mode
-                    {
-                        bookshelf_core::PreviewMode::Text => bookshelf_core::PreviewMode::Text,
-                        bookshelf_core::PreviewMode::Braille => bookshelf_core::PreviewMode::Text,
-                        bookshelf_core::PreviewMode::Blocks => bookshelf_core::PreviewMode::Braille,
-                    };
-                }
-                Ok(None)
-            }
-            KeyCode::Right => {
-                if self.preview_panel.selected == 0 {
-                    self.preview_panel.draft.preview_mode = match self
-                        .preview_panel
-                        .draft
-                        .preview_mode
-                    {
-                        bookshelf_core::PreviewMode::Text => bookshelf_core::PreviewMode::Braille,
-                        bookshelf_core::PreviewMode::Braille => bookshelf_core::PreviewMode::Blocks,
-                        bookshelf_core::PreviewMode::Blocks => bookshelf_core::PreviewMode::Blocks,
-                    };
-                }
-                Ok(None)
-            }
-            KeyCode::Backspace => {
-                self.preview_panel.backspace();
-                Ok(None)
-            }
-            KeyCode::Char(ch) if ch.is_ascii_digit() => {
-                self.preview_panel.push_digit(ch);
                 Ok(None)
             }
             _ => Ok(None),
@@ -1376,10 +1280,6 @@ impl Ui {
 
         if self.settings_panel.open {
             self.draw_settings_panel(area, frame);
-        }
-
-        if self.preview_panel.open {
-            self.draw_preview_panel(area, frame);
         }
 
         if self.scan_panel.open {
@@ -1703,9 +1603,8 @@ impl Ui {
             self.ctx.settings.reader_mode = ReaderMode::Text;
             self.reader.current_image = None;
             self.reader.render_key = None;
-            self.reader.notice = Some(
-                "kitty graphics protocol not detected; image mode disabled".to_string(),
-            );
+            self.reader.notice =
+                Some("kitty graphics protocol not detected; image mode disabled".to_string());
         }
 
         let layout = Layout::default()
@@ -1852,9 +1751,7 @@ impl Ui {
             footer_spans.push(Span::raw(" mode"));
         }
 
-        if self.ctx.settings.reader_mode == ReaderMode::Text
-            && !kitty_ok
-        {
+        if self.ctx.settings.reader_mode == ReaderMode::Text && !kitty_ok {
             footer_spans.push(Span::raw("  "));
             footer_spans.push(Span::styled(
                 "k",
@@ -1969,10 +1866,7 @@ impl Ui {
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
 
-        let items = vec![
-            ListItem::new(Line::raw("Scan Paths")),
-            ListItem::new(Line::raw("Preview Settings")),
-        ];
+        let items = vec![ListItem::new(Line::raw("Scan Paths"))];
 
         let list = List::new(items)
             .block(block)
@@ -1981,7 +1875,7 @@ impl Ui {
             .highlight_spacing(HighlightSpacing::Always);
 
         let mut state = ListState::default();
-        state.select(Some(self.settings_panel.selected.min(1)));
+        state.select(Some(0));
         frame.render_stateful_widget(list, popup_area, &mut state);
     }
 
@@ -2062,19 +1956,12 @@ impl Ui {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn draw_details(&self, area: Rect) -> Paragraph<'static> {
+    fn draw_details(&self, _area: Rect) -> Paragraph<'static> {
         let mut lines = Vec::new();
         lines.push(Line::from(vec![
-            Span::styled("Preview: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(self.ctx.settings.preview_mode.to_string()),
+            Span::styled("Reader: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(self.ctx.settings.reader_mode.to_string()),
             Span::raw("  "),
-            Span::styled("Depth: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(self.ctx.settings.preview_depth.to_string()),
-            Span::raw("  "),
-            Span::styled("Pages: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(self.ctx.settings.preview_pages.to_string()),
-        ]));
-        lines.push(Line::from(vec![
             Span::styled("Scan: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(self.ctx.settings.scan_scope.to_string()),
             Span::raw("  "),
@@ -2084,7 +1971,6 @@ impl Ui {
         lines.push(Line::raw(""));
 
         if let Some(book) = self.ctx.books.get(self.ctx.selected) {
-            let preview_width = area.width.saturating_sub(2).max(1);
             lines.push(Line::from(vec![
                 Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(book.title.clone()),
@@ -2113,13 +1999,6 @@ impl Ui {
                 Span::raw(format_last_opened(book.last_opened)),
             ]));
             lines.push(Line::raw(""));
-
-            let preview = self
-                .engine
-                .render_preview_for(book, &self.ctx.settings, preview_width);
-            for line in preview.lines().take(self.ctx.settings.preview_depth.max(1)) {
-                lines.push(Line::raw(line.to_string()));
-            }
         } else {
             lines.push(Line::raw("No selection."));
         }
@@ -2127,121 +2006,6 @@ impl Ui {
         Paragraph::new(Text::from(lines))
             .block(Block::default().borders(Borders::ALL).title("Details"))
             .wrap(Wrap { trim: true })
-    }
-
-    fn draw_preview_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(60, 40, area);
-        frame.render_widget(Clear, popup_area);
-
-        let block = Block::default().borders(Borders::ALL).title(Span::styled(
-            "Preview Settings",
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
-        frame.render_widget(block.clone(), popup_area);
-
-        let inner = block.inner(popup_area);
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Length(5)])
-            .split(inner);
-
-        let highlight_style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-
-        let depth_input_ok = self.preview_panel.depth_input.parse::<usize>().is_ok();
-        let pages_input_ok = self.preview_panel.pages_input.parse::<usize>().is_ok();
-
-        let mode_row_selected = self.preview_panel.selected == 0;
-
-        let items = vec![
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    "Preview mode: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(" "),
-                option_chip(
-                    "text",
-                    self.preview_panel.draft.preview_mode == bookshelf_core::PreviewMode::Text,
-                    mode_row_selected,
-                ),
-                Span::raw(" "),
-                option_chip(
-                    "braille",
-                    self.preview_panel.draft.preview_mode == bookshelf_core::PreviewMode::Braille,
-                    mode_row_selected,
-                ),
-                Span::raw(" "),
-                option_chip(
-                    "blocks",
-                    self.preview_panel.draft.preview_mode == bookshelf_core::PreviewMode::Blocks,
-                    mode_row_selected,
-                ),
-            ])),
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("Preview depth (max {MAX_PREVIEW_DEPTH}): "),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    self.preview_panel.depth_input.clone(),
-                    Style::default().fg(if depth_input_ok {
-                        Color::Cyan
-                    } else {
-                        Color::Red
-                    }),
-                ),
-            ])),
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("Preview pages (max {MAX_PREVIEW_PAGES}): "),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    self.preview_panel.pages_input.clone(),
-                    Style::default().fg(if pages_input_ok {
-                        Color::Cyan
-                    } else {
-                        Color::Red
-                    }),
-                ),
-            ])),
-        ];
-
-        let list = List::new(items)
-            .highlight_style(highlight_style)
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_symbol("> ");
-
-        let mut state = ListState::default();
-        state.select(Some(self.preview_panel.selected.min(2)));
-        frame.render_stateful_widget(list, sections[0], &mut state);
-
-        let help = Paragraph::new(Text::from(vec![
-            Line::from(vec![
-                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" select  "),
-                Span::styled("Tab/m/←/→", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cycle mode"),
-            ]),
-            Line::from(vec![
-                Span::styled("0-9", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" edit number  "),
-                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" delete"),
-            ]),
-            Line::from(vec![
-                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" apply  "),
-                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cancel"),
-            ]),
-        ]))
-        .wrap(Wrap { trim: true })
-        .alignment(Alignment::Left);
-        frame.render_widget(help, sections[1]);
     }
 
     fn draw_scan_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -2332,96 +2096,6 @@ impl Ui {
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
         frame.render_widget(help, sections[1]);
-    }
-}
-
-#[derive(Debug, Clone)]
-struct PreviewPanel {
-    open: bool,
-    draft: Settings,
-    selected: usize,
-    depth_input: String,
-    pages_input: String,
-    editing_numeric: bool,
-}
-
-impl PreviewPanel {
-    fn new(settings: Settings) -> Self {
-        Self {
-            open: false,
-            draft: settings,
-            selected: 0,
-            depth_input: String::new(),
-            pages_input: String::new(),
-            editing_numeric: false,
-        }
-    }
-
-    fn begin_editing(&mut self) {
-        self.depth_input = self.draft.preview_depth.to_string();
-        self.pages_input = self.draft.preview_pages.to_string();
-        self.selected = 0;
-        self.editing_numeric = false;
-    }
-
-    fn reset_invalid_inputs(&mut self) {
-        if self.depth_input.parse::<usize>().is_err() {
-            self.depth_input = self.draft.preview_depth.to_string();
-        }
-        if self.pages_input.parse::<usize>().is_err() {
-            self.pages_input = self.draft.preview_pages.to_string();
-        }
-    }
-
-    fn push_digit(&mut self, digit: char) {
-        let buf = match self.selected {
-            1 => &mut self.depth_input,
-            2 => &mut self.pages_input,
-            _ => return,
-        };
-
-        if !self.editing_numeric {
-            buf.clear();
-            self.editing_numeric = true;
-        }
-
-        if buf.len() >= 4 {
-            return;
-        }
-        buf.push(digit);
-        self.sync_inputs_to_draft();
-    }
-
-    fn backspace(&mut self) {
-        let buf = match self.selected {
-            1 => &mut self.depth_input,
-            2 => &mut self.pages_input,
-            _ => return,
-        };
-        self.editing_numeric = true;
-        buf.pop();
-        self.sync_inputs_to_draft();
-    }
-
-    fn sync_inputs_to_draft(&mut self) {
-        let mut depth_ok = false;
-        let mut pages_ok = false;
-        if let Ok(value) = self.depth_input.parse::<usize>() {
-            self.draft.preview_depth = value;
-            depth_ok = true;
-        }
-        if let Ok(value) = self.pages_input.parse::<usize>() {
-            self.draft.preview_pages = value;
-            pages_ok = true;
-        }
-        self.draft.normalize();
-
-        if depth_ok {
-            self.depth_input = self.draft.preview_depth.to_string();
-        }
-        if pages_ok {
-            self.pages_input = self.draft.preview_pages.to_string();
-        }
     }
 }
 
@@ -2688,23 +2362,24 @@ impl ReaderPanel {
                     .saturating_mul(u32::from(font_h_px))
                     .max(1);
 
-                let fit_page_to_frame =
-                    self.image_zoom_percent == 100 && self.image_pan_x_px == 0 && self.image_pan_y_px == 0;
+                let fit_page_to_frame = self.image_zoom_percent == 100
+                    && self.image_pan_x_px == 0
+                    && self.image_pan_y_px == 0;
 
                 let base_render_width_px = if fit_page_to_frame {
-                    let (page_w_pt, page_h_pt) =
-                        engine.page_size_points(&book, self.page).unwrap_or((1.0, 1.0));
-                    let ratio = (page_w_pt as f64 / page_h_pt.max(1.0) as f64)
-                        .clamp(0.05, 20.0);
+                    let (page_w_pt, page_h_pt) = engine
+                        .page_size_points(&book, self.page)
+                        .unwrap_or((1.0, 1.0));
+                    let ratio = (page_w_pt as f64 / page_h_pt.max(1.0) as f64).clamp(0.05, 20.0);
                     let fit_w = (viewport_h_px as f64 * ratio).round().max(1.0) as u32;
                     viewport_w_px.min(fit_w)
                 } else {
                     viewport_w_px
                 };
 
-                let render_width_px =
-                    (u64::from(base_render_width_px).saturating_mul(u64::from(self.image_zoom_percent.max(1))))
-                        / 100;
+                let render_width_px = (u64::from(base_render_width_px)
+                    .saturating_mul(u64::from(self.image_zoom_percent.max(1))))
+                    / 100;
                 let render_width_px = render_width_px.clamp(1, i32::MAX as u64) as u32;
 
                 let need_new_page_image = match self.page_image.as_ref() {
@@ -2724,7 +2399,8 @@ impl ReaderPanel {
                             && c.zoom_percent == self.image_zoom_percent
                             && c.render_width_px == render_width_px
                             && c.font_size == (font_w_px, font_h_px)
-                    }) && let Some(cached) = self.page_image_cache.remove(pos) {
+                    }) && let Some(cached) = self.page_image_cache.remove(pos)
+                    {
                         self.page_image = Some(cached);
                     } else {
                         let rasterize_start = Instant::now();
@@ -2833,14 +2509,18 @@ impl ReaderPanel {
 
                     let proto = if image_protocol::in_kitty_env() {
                         let cols = u16::try_from(
-                            (transmit_px.0.saturating_add(u32::from(font_w_px).saturating_sub(1)))
+                            (transmit_px
+                                .0
+                                .saturating_add(u32::from(font_w_px).saturating_sub(1)))
                                 / u32::from(font_w_px),
                         )
                         .unwrap_or(width)
                         .max(1)
                         .min(width);
                         let rows = u16::try_from(
-                            (transmit_px.1.saturating_add(u32::from(font_h_px).saturating_sub(1)))
+                            (transmit_px
+                                .1
+                                .saturating_add(u32::from(font_h_px).saturating_sub(1)))
                                 / u32::from(font_h_px),
                         )
                         .unwrap_or(height)
@@ -2851,7 +2531,8 @@ impl ReaderPanel {
                         let id = self.next_kitty_image_id;
                         self.next_kitty_image_id = self.next_kitty_image_id.wrapping_add(1).max(1);
                         let is_tmux = std::env::var_os("TMUX").is_some();
-                        Kitty::new(transmit_image, kitty_area, id, is_tmux).map(ImageProtocol::Kitty)
+                        Kitty::new(transmit_image, kitty_area, id, is_tmux)
+                            .map(ImageProtocol::Kitty)
                     } else {
                         picker.new_protocol(transmit_image, size, Resize::Fit(None))
                     };

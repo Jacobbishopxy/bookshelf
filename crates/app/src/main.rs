@@ -1,4 +1,3 @@
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -9,17 +8,6 @@ use bookshelf_storage::Storage;
 use bookshelf_ui::{Ui, UiExit};
 
 fn main() {
-    if std::env::args_os()
-        .skip(1)
-        .any(|arg| arg == OsStr::new("--pdfium-worker"))
-    {
-        if let Err(err) = bookshelf_engine::run_pdfium_worker_from_env() {
-            eprintln!("{err:?}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     if let Err(err) = run() {
         eprintln!("{err:?}");
         std::process::exit(1);
@@ -27,14 +15,6 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    if std::env::var_os("BOOKSHELF_PDFIUM_WORKER_EXE").is_none()
-        && let Ok(exe) = std::env::current_exe()
-    {
-        unsafe {
-            std::env::set_var("BOOKSHELF_PDFIUM_WORKER_EXE", exe);
-        }
-    }
-
     let cwd = std::env::current_dir().context("get cwd")?;
     let cwd_str = cwd.to_string_lossy().to_string();
 
