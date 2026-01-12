@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use bookshelf_core::{Book, ReaderMode, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
@@ -390,24 +391,21 @@ impl Engine {
     }
 
     pub fn page_size_points(&self, book: &Book, page_index: u32) -> anyhow::Result<(f32, f32)> {
-        if self.pdfium_disabled() {
-            anyhow::bail!("pdfium disabled via BOOKSHELF_DISABLE_PDFIUM");
-        }
-
-        let pdfium = self.pdfium()?;
         let path = bookshelf_core::decode_path(&book.path);
-        let document = pdfium
-            .load_pdf_from_file(&path, None)
-            .map_err(|err| anyhow::anyhow!(err))?;
+        let file = FileOptions::cached()
+            .open(&path)
+            .with_context(|| format!("open pdf for page size: {}", path.display()))?;
+        let page = file
+            .get_page(page_index)
+            .with_context(|| format!("get pdf page {page_index} for page size"))?;
 
-        let page_index =
-            u16::try_from(page_index).map_err(|_| anyhow::anyhow!("page index out of range"))?;
-        let page = document
-            .pages()
-            .get(page_index)
-            .map_err(|err| anyhow::anyhow!(err))?;
-
-        Ok((page.width().value, page.height().value))
+        let rect = page
+            .crop_box()
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("get page crop box")?;
+        let width = (rect.right - rect.left).abs().max(1.0);
+        let height = (rect.top - rect.bottom).abs().max(1.0);
+        Ok((width, height))
     }
 
     fn pdfium(&self) -> anyhow::Result<Ref<'_, Pdfium>> {

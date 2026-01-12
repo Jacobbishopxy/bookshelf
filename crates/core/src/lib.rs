@@ -149,6 +149,14 @@ impl KittyImageQuality {
         }
     }
 
+    pub fn max_render_pixels(&self) -> u64 {
+        match self {
+            KittyImageQuality::Fast => 4_000_000,
+            KittyImageQuality::Balanced => 8_000_000,
+            KittyImageQuality::Sharp => 12_000_000,
+        }
+    }
+
     pub fn next(&self) -> Self {
         match self {
             KittyImageQuality::Fast => KittyImageQuality::Balanced,

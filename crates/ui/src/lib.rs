@@ -2445,12 +2445,13 @@ impl ReaderPanel {
                     && self.image_pan_x_px == 0
                     && self.image_pan_y_px == 0;
 
+                let (page_w_pt, page_h_pt) = engine
+                    .page_size_points(&book, self.page)
+                    .unwrap_or((1.0, 1.0));
+                let page_ratio = (page_w_pt as f64 / page_h_pt.max(1.0) as f64).clamp(0.05, 20.0);
+
                 let base_render_width_px = if fit_page_to_frame {
-                    let (page_w_pt, page_h_pt) = engine
-                        .page_size_points(&book, self.page)
-                        .unwrap_or((1.0, 1.0));
-                    let ratio = (page_w_pt as f64 / page_h_pt.max(1.0) as f64).clamp(0.05, 20.0);
-                    let fit_w = (viewport_h_px as f64 * ratio).round().max(1.0) as u32;
+                    let fit_w = (viewport_h_px as f64 * page_ratio).round().max(1.0) as u32;
                     viewport_w_px.min(fit_w)
                 } else {
                     viewport_w_px
@@ -2460,6 +2461,17 @@ impl ReaderPanel {
                     .saturating_mul(u64::from(self.image_zoom_percent.max(1))))
                     / 100;
                 let render_width_px = render_width_px.clamp(1, i32::MAX as u64) as u32;
+
+                let max_render_pixels = ctx.settings.kitty_image_quality.max_render_pixels().max(1);
+                const MAX_RENDER_WIDTH_PX: u32 = 8192;
+                let max_width_by_pixels = ((max_render_pixels as f64) * page_ratio)
+                    .sqrt()
+                    .floor()
+                    .max(1.0) as u32;
+                let render_width_px = render_width_px
+                    .min(MAX_RENDER_WIDTH_PX)
+                    .min(max_width_by_pixels)
+                    .max(1);
 
                 let need_new_page_image = match self.page_image.as_ref() {
                     None => true,

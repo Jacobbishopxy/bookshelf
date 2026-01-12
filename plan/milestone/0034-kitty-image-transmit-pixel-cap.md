@@ -19,4 +19,4 @@ In Kitty image mode the slow path is often building/sending the Kitty graphics p
 ## Test plan
 
 - [x] `cargo test -p ui --offline`
-- [ ] Manual in Kitty: pan a page and confirm `protocol_ms` drops when `transmit_px` < `viewport_px`.
+- [x] Manual in Kitty: pan a page and confirm `protocol_ms` drops when `transmit_px` < `viewport_px`.
