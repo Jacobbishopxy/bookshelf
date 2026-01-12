@@ -96,6 +96,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[serde(default)]
 pub struct Settings {
     pub reader_mode: ReaderMode,
+    pub reader_text_mode: ReaderTextMode,
     pub kitty_image_quality: KittyImageQuality,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
@@ -106,6 +107,14 @@ pub struct Settings {
 pub enum ReaderMode {
     Text,
     Image,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReaderTextMode {
+    Raw,
+    Wrap,
+    Reflow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +137,16 @@ impl ReaderMode {
         match self {
             ReaderMode::Text => "text",
             ReaderMode::Image => "image",
+        }
+    }
+}
+
+impl ReaderTextMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReaderTextMode::Raw => "raw",
+            ReaderTextMode::Wrap => "wrap",
+            ReaderTextMode::Reflow => "reflow",
         }
     }
 }
@@ -180,6 +199,12 @@ impl std::fmt::Display for ReaderMode {
     }
 }
 
+impl std::fmt::Display for ReaderTextMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::fmt::Display for KittyImageQuality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -194,6 +219,19 @@ impl std::str::FromStr for ReaderMode {
             "text" => Ok(ReaderMode::Text),
             "image" => Ok(ReaderMode::Image),
             _ => Err("unknown reader mode"),
+        }
+    }
+}
+
+impl std::str::FromStr for ReaderTextMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "raw" => Ok(ReaderTextMode::Raw),
+            "wrap" => Ok(ReaderTextMode::Wrap),
+            "reflow" => Ok(ReaderTextMode::Reflow),
+            _ => Err("unknown reader text mode"),
         }
     }
 }
@@ -242,6 +280,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             reader_mode: ReaderMode::Text,
+            reader_text_mode: ReaderTextMode::Reflow,
             kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
@@ -265,6 +304,14 @@ impl Settings {
         self.reader_mode = match self.reader_mode {
             ReaderMode::Text => ReaderMode::Image,
             ReaderMode::Image => ReaderMode::Text,
+        };
+    }
+
+    pub fn cycle_reader_text_mode(&mut self) {
+        self.reader_text_mode = match self.reader_text_mode {
+            ReaderTextMode::Raw => ReaderTextMode::Wrap,
+            ReaderTextMode::Wrap => ReaderTextMode::Reflow,
+            ReaderTextMode::Reflow => ReaderTextMode::Raw,
         };
     }
 
@@ -362,6 +409,17 @@ mod tests {
     }
 
     #[test]
+    fn reader_text_mode_parses_strings() {
+        assert_eq!("raw".parse::<ReaderTextMode>().unwrap(), ReaderTextMode::Raw);
+        assert_eq!(" WRAP ".parse::<ReaderTextMode>().unwrap(), ReaderTextMode::Wrap);
+        assert_eq!(
+            "Reflow".parse::<ReaderTextMode>().unwrap(),
+            ReaderTextMode::Reflow
+        );
+        assert!("nope".parse::<ReaderTextMode>().is_err());
+    }
+
+    #[test]
     fn scan_scope_parses_strings() {
         assert_eq!("direct".parse::<ScanScope>().unwrap(), ScanScope::Direct);
         assert_eq!(
@@ -375,6 +433,7 @@ mod tests {
     fn settings_normalizes_depth() {
         let mut settings = Settings {
             reader_mode: ReaderMode::Text,
+            reader_text_mode: ReaderTextMode::Reflow,
             kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Direct,
             library_roots: vec![

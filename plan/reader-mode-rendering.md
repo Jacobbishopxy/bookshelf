@@ -1,23 +1,22 @@
-# Preview Rendering Investigation (text, braille/blocks, ratatui-image)
+# Reader Mode Rendering (text extraction + image rendering)
+
+Note: this file predates removing the Preview panel; Preview was removed in `plan/milestone/0038-remove-preview-feature.md`.
 
 This note responds to the issues shown in:
 
 - `tmp/bookshelf-debug-text.png`
-- `tmp/bookshelf-debug-braille.png`
-- `tmp/bookshelf-debug-blocks.png`
 
 and answers:
 
-1. How to make **text** mode more user friendly (paragraphs, readability).
-2. How to render **braille/blocks** “as original as possible”.
-3. Whether **ratatui-image + PDF → image** can improve things.
+1. How to make **Reader text** mode more user friendly (paragraphs, readability).
+2. How to get **high-fidelity Reader image** rendering when available.
 
 ## Current implementation (what Bookshelf does today)
 
-### Text mode
+### Reader text mode
 
 - Code path: `crates/engine/src/lib.rs`
-  - Extraction: `ops_to_text()` and `render_page_text()` / `render_text_preview()`.
+  - Extraction: `ops_to_text()` and `render_page_text()`.
   - Data source: `pdf` crate content ops (`Op::TextDraw`, `Op::TextDrawAdjusted`, etc).
   - Line breaks:
     - `Op::TextNewline` → `\n`
@@ -26,24 +25,17 @@ and answers:
 
 This is intentionally simple, but it does **not** reconstruct layout (columns, indentation, paragraph spacing, hyphenation, headers/footers).
 
-### Braille / Blocks mode (unicode art)
+### Reader image mode
 
-- Code path: `crates/engine/src/lib.rs`
-  - Rasterize via Pdfium: `render_page_bitmap_gray()` renders to `PdfBitmapFormat::Gray`.
-  - Convert pixels → chars in `render_page_raster_in_process()`:
-    - `PreviewMode::Braille`: `braille_cell()` (2×4 pixels per char, 1-bit threshold)
-    - `PreviewMode::Blocks`: `blocks_cell()` (2×4 pixels per char, 5 shades: `░▒▓█`)
+- Code path: `crates/ui/src/lib.rs`
+  - Rasterize via Pdfium to RGBA (engine): `Engine::render_page_bitmap_rgba()` (`crates/engine/src/lib.rs`)
+  - Display as a real image in Kitty: `ratatui-image` using the Kitty graphics protocol
 
-This is “portable” (works everywhere), but it’s fundamentally low-fidelity:
-
-- very low “dpi” in terminal character cells
-- grayscale only (no color)
-- no dithering / contrast tuning
-- fixed thresholding for braille (`THRESHOLD: 200`)
+This gives near-original output (and avoids “character art” compromises), but it’s only available when the terminal supports it (Bookshelf currently gates image mode on Kitty).
 
 ## What the screenshots tell us (root causes)
 
-### 1) Text mode is hard to read
+### 1) Reader text mode is hard to read
 
 Common PDF text extraction problems that match the screenshot:
 
@@ -52,17 +44,7 @@ Common PDF text extraction problems that match the screenshot:
 - **Hyphenation artifacts**: line-end hyphens should sometimes be removed and words re-joined.
 - **Headers/footers**: repeated page furniture pollutes the reading flow.
 
-### 2) Braille/blocks are not “human readable”
-
-Two main reasons:
-
-1. **Resolution is too low** for text shapes.
-   - Current render width is basically “1 pixel per output dot”, so the page is downscaled extremely aggressively.
-2. **The conversion is naive** (hard threshold / coarse shading), so anti-aliased text becomes noise.
-
-Even with improvements, braille/blocks will never look like the original PDF. If the goal is *“as original as possible”*, you want **true terminal image protocols** (Kitty/iTerm2/Sixel) rather than character art.
-
-## Q1 — Making text mode more user friendly
+## Q1 — Making Reader text mode more user friendly
 
 There are two viable directions: **heuristic reflow** (fastest) or **layout-aware extraction** (best results).
 
@@ -131,65 +113,14 @@ This is often more consistent and already solves some mapping problems.
 - Add search highlight and “jump to next match” to help navigation even when extraction is imperfect.
 - When extraction fails (`no text found`), offer a one-key switch to image preview (see below).
 
-## Q2 — Rendering braille/blocks as original as possible
-
-### Reality check: unicode art cannot be “original”
-
-Braille/blocks are inherently approximations. The best “portable” you can do is:
-
-- higher sampling resolution
-- better tone mapping and dithering
-- optional color (requires non-string output / styled cells)
-
-If the goal is truly “original as possible”, use **terminal image protocols** via `ratatui-image`.
-
-### A. Improve current braille/blocks (still character art)
-
-1) **Render at higher pixel resolution (oversample)**
-
-Instead of:
-
-- `pixel_width = width_chars * cell_w`
-
-render at:
-
-- `pixel_width = width_chars * cell_w * SCALE` (e.g. SCALE=2..4)
-
-Then downsample per dot/block using averaging. This alone typically makes text shapes recognizable.
-
-1) **Adaptive thresholding for braille**
-
-Replace fixed `THRESHOLD=200` with:
-
-- global auto-threshold (e.g., Otsu)
-- or per-cell adaptive threshold (local mean/variance)
-
-This reduces “speckle noise” and recovers faint strokes.
-
-1) **Dithering for blocks**
-
-Instead of mapping avg darkness to 5 characters, use ordered dithering (Bayer matrix) to choose among a richer set of block characters.
-
-1) **Optional color**
-
-Blocks/halfblocks become dramatically more readable with truecolor:
-
-- `▀` with per-cell fg/bg (two vertical pixels per cell)
-- “pixel art in cells” style
-
-This requires changing the engine output type away from `String` (e.g., return a `ratatui::Text` or a 2D buffer of styled cells), or doing the mapping in the UI layer.
-
-At this point, `ratatui-image` already solves most of this better.
-
-### B. Use ratatui-image (closest to “original”)
+## Q2 — High-fidelity image rendering
 
 `ratatui-image` supports:
 
 - Kitty graphics protocol
 - iTerm2 protocol
 - Sixel
-- fallback “halfblocks” (unicode + fg/bg colors)
-- optional chafa integration for very high quality text-mode image rendering
+- fallback “halfblocks” (unicode + fg/bg colors) when no image protocol is available
 
 Key API points from the crate (source: `ratatui-image` v10.0.2):
 
@@ -202,7 +133,7 @@ Key API points from the crate (source: `ratatui-image` v10.0.2):
 
 #### PDF → image: how to feed ratatui-image
 
-Bookshelf already rasterizes via Pdfium. For ratatui-image, prefer producing an RGBA `DynamicImage`:
+Bookshelf rasterizes via Pdfium. For ratatui-image, produce an RGBA `DynamicImage`:
 
 1) Compute the target pixel size from render area and font size:
 
@@ -232,6 +163,7 @@ and rely on its built-in primitive halfblocks fallback.
 
 ### Phase 1 — Text readability (no new UI widgets)
 
+- Tracked as milestone: `plan/milestone/0039-reader-text-readability.md`
 - Add a text post-processing pass:
   - de-hyphenate
   - paragraph joining (simple heuristics)
@@ -239,32 +171,14 @@ and rely on its built-in primitive halfblocks fallback.
   - wrap to viewport width (reflow mode)
 - Add a Reader toggle: `Raw` vs `Reflow`.
 
-### Phase 2 — Reader image mode (ratatui-image)
+### Phase 2 — Reader image mode
 
-- Keep **Preview** as `Text` / `Braille` / `Blocks` (portable and fast).
-- Add a **Reader** render mode:
-  - `ReaderMode::Image` using `ratatui-image` (protocol auto-detect; halfblocks fallback).
-- This keeps image rendering in the Reader only, and avoids expensive inline-image work in the library preview.
-
-### Phase 3 — True image protocols when available (best fidelity)
-
-- At startup, call `Picker::from_query_stdio()` (after alt screen, before event loop).
-- If protocol is Kitty/iTerm2/Sixel, allow:
-  - `Image (Auto)` that uses the best available protocol
-- Use `ThreadProtocol` or a dedicated render worker to keep the UI responsive.
-
-### Phase 4 — Optional: keep braille/blocks, but fix them
-
-If you still want braille/blocks as a “no color / purely textual” mode:
-
-- oversample + downsample
-- adaptive thresholds + dithering
+- Already implemented via `ratatui-image` in the Reader; focus future work on ergonomics/perf (zoom, pan, caching).
 
 ## Open questions / decisions to make
 
-1) Do we want separate `PreviewMode` (Preview panel) and `ReaderMode` (Reader panel), or a single shared mode?
-2) Is `libchafa` an acceptable runtime dependency? If not, disable `ratatui-image` default features.
-3) How should scrolling/zoom work for image pages?
+1) Is `libchafa` an acceptable runtime dependency? If not, disable `ratatui-image` default features.
+2) How should scrolling/zoom work for image pages?
    - fit-to-width vs fit-to-height
    - zoom in/out with pan (arrow keys)
 
@@ -288,7 +202,7 @@ This means we need a layered strategy:
 
 ## Alternative approaches that work over SSH (even without inline image support)
 
-### 1) Make text preview genuinely readable (universal)
+### 1) Make Reader text genuinely readable (universal)
 
 If the user is in a “plain” terminal, **text is the only guaranteed medium**.
 
@@ -306,7 +220,7 @@ Engine work (see Q1 above):
 
 This makes the default experience much better for everyone, regardless of terminal.
 
-### 2) Portable “pixel-ish” fallback using halfblocks (works in most terminals)
+### 2) Portable “pixel-ish” fallback using halfblocks (optional)
 
 Even without Kitty/Sixel/iTerm2, we can render a page as:
 
@@ -314,38 +228,12 @@ Even without Kitty/Sixel/iTerm2, we can render a page as:
 
 This is what `ratatui-image` uses as its **fallback protocol**.
 
-It’s still limited by terminal cell resolution, but it’s typically **far more readable** than pure braille/blocks because:
+It’s still limited by terminal cell resolution, but it’s typically **far more readable** than older unicode-art approaches because:
 
 - it uses color
 - it uses sub-cell vertical resolution (fg+bg)
-- it can do better scaling than our current 2×4 grayscale mapping
+- it can do better scaling than naive per-cell thresholding
 
-### 3) “Open in browser” preview (highest fidelity, terminal-independent)
+### 3) Spawn a local Kitty Reader window (highest fidelity)
 
-If the real goal is *“as original as possible”* and it must work from any SSH terminal,
-the most robust approach is: **render pages to images and view them outside the terminal**.
-
-Two practical variants:
-
-#### A) Export images to `tmp/` (simple)
-
-- Keybinding: “Export current page preview”
-- Writes `tmp/bookshelf-preview-<id>-p<page>.png`
-- UI shows:
-  - local path
-  - suggested commands (`scp`, `rsync`, `sshfs`) for remote → local viewing
-
-#### B) Embedded HTTP preview server + SSH port forwarding (best UX)
-
-- Keybinding: “Preview in browser”
-- App starts an HTTP server on `127.0.0.1:<port>` on the machine running Bookshelf.
-- It serves:
-  - a minimal HTML viewer with next/prev page controls and zoom
-  - PNG/JPEG endpoints rendered on-demand (with caching)
-
-Remote workflow:
-
-- user runs `ssh -L 8181:127.0.0.1:8181 <remote>`
-- open `http://127.0.0.1:8181` locally in a browser
-
-This works even if the user’s terminal is extremely limited, and it gives real zoom/pan.
+When running in a non-Kitty terminal, spawning a dedicated Kitty reader window provides a “works everywhere” escape hatch without reintroducing Preview.

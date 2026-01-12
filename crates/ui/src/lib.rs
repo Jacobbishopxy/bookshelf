@@ -10,7 +10,9 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{Bookmark, KittyImageQuality, Note, ReaderMode, Settings, TocItem};
+use bookshelf_core::{
+    Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings, TocItem,
+};
 use bookshelf_engine::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -516,6 +518,15 @@ impl Ui {
                         self.reader.invalidate_render();
                         self.reader.notice = Some("mode: text".to_string());
                     }
+                }
+                Ok(None)
+            }
+            KeyCode::Char('r') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Text {
+                    self.ctx.settings.cycle_reader_text_mode();
+                    self.reader.invalidate_render();
+                    self.reader.notice =
+                        Some(format!("text: {}", self.ctx.settings.reader_text_mode));
                 }
                 Ok(None)
             }
@@ -1274,7 +1285,7 @@ impl Ui {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(0),
-                Constraint::Length(2),
+                Constraint::Length(3),
             ])
             .split(area);
 
@@ -1637,30 +1648,31 @@ impl Ui {
             ])
             .split(area);
 
-        let mode_text = match self.ctx.settings.reader_mode {
-            ReaderMode::Text => "text".to_string(),
-            ReaderMode::Image => {
-                let (fw, fh) = self.image_picker.font_size();
-                format!(
-                    "image kitty {}% (cell {}x{}px)",
-                    self.reader.image_zoom_percent, fw, fh
-                )
-            }
+        let title_text = match &self.reader.book_title {
+            Some(title) => format!("Reader — {title}"),
+            None => "Reader".to_string(),
         };
 
-        let title_text = match (&self.reader.book_title, self.reader.total_pages) {
-            (Some(title), Some(total)) => format!(
-                "Reader — {}  (page {}/{})  [{mode_text}]",
-                title,
-                self.reader.page.saturating_add(1),
-                total
-            ),
-            (Some(title), None) => format!(
-                "Reader — {}  (page {})  [{mode_text}]",
-                title,
-                self.reader.page + 1
-            ),
-            _ => format!("Reader  [{mode_text}]"),
+        let page_title = {
+            let page = self.reader.page.saturating_add(1);
+            let page_part = if let Some(total) = self.reader.total_pages {
+                format!("p{page}/{total}")
+            } else {
+                format!("p{page}")
+            };
+
+            let mode_part = match self.ctx.settings.reader_mode {
+                ReaderMode::Text => self.ctx.settings.reader_text_mode.to_string(),
+                ReaderMode::Image => {
+                    let (fw, fh) = self.image_picker.font_size();
+                    format!(
+                        "kitty {}% · {}x{}px",
+                        self.reader.image_zoom_percent, fw, fh
+                    )
+                }
+            };
+
+            format!("{page_part} · {mode_part}")
         };
 
         let header = Paragraph::new(Line::from(vec![Span::styled(
@@ -1668,6 +1680,7 @@ impl Ui {
             Style::default().add_modifier(Modifier::BOLD),
         )]))
         .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(header, layout[0]);
 
@@ -1686,7 +1699,7 @@ impl Ui {
         );
 
         if self.ctx.settings.reader_mode == ReaderMode::Image {
-            let block = Block::default().borders(Borders::ALL).title("Page");
+            let block = Block::default().borders(Borders::ALL).title(page_title);
             frame.render_widget(block.clone(), layout[1]);
             let inner = block.inner(layout[1]);
 
@@ -1731,9 +1744,8 @@ impl Ui {
                     .map(|line| Line::raw(line.to_string()))
                     .collect::<Vec<_>>(),
             );
-            let body = Paragraph::new(text)
-                .block(Block::default().borders(Borders::ALL).title("Page"))
-                .wrap(Wrap { trim: false });
+            let body =
+                Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(page_title));
             frame.render_widget(body, layout[1]);
         }
 
@@ -1781,6 +1793,15 @@ impl Ui {
             footer_spans.push(Span::raw(" kitty-reader"));
         }
 
+        if self.ctx.settings.reader_mode == ReaderMode::Text {
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                "r",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" raw/wrap/reflow"));
+        }
+
         if self.ctx.settings.reader_mode == ReaderMode::Image {
             footer_spans.push(Span::raw("  "));
             footer_spans.push(Span::styled(
@@ -1817,6 +1838,7 @@ impl Ui {
 
         let footer = Paragraph::new(Line::from(footer_spans))
             .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::TOP));
         frame.render_widget(footer, layout[2]);
 
@@ -2266,6 +2288,7 @@ struct BookMetaCache {
 struct ReaderRenderKey {
     page: u32,
     mode: ReaderMode,
+    text_mode: ReaderTextMode,
     width: u16,
     height: u16,
 }
@@ -2403,6 +2426,7 @@ impl ReaderPanel {
         let width = width.max(1);
         let height = height.max(1);
         let mode = ctx.settings.reader_mode;
+        let text_mode = ctx.settings.reader_text_mode;
 
         let Some(book) = self.current_book() else {
             self.current_text = None;
@@ -2410,6 +2434,7 @@ impl ReaderPanel {
             self.render_key = Some(ReaderRenderKey {
                 page: self.page,
                 mode,
+                text_mode,
                 width,
                 height,
             });
@@ -2419,6 +2444,7 @@ impl ReaderPanel {
         let key = ReaderRenderKey {
             page: self.page,
             mode,
+            text_mode,
             width,
             height,
         };
@@ -2670,8 +2696,24 @@ impl ReaderPanel {
                     }
                 }
             }
-            _ => match engine.render_page_for_reader(&book, self.page, mode, width, height) {
+            _ => match engine.render_page_for_reader(&book, self.page, mode, text_mode, width, height)
+            {
                 Ok(text) => {
+                    let text = if is_non_text_page(&text) {
+                        let kitty_ok = image_protocol::kitty_supported(picker);
+                        let hint = if kitty_ok {
+                            "image/chart (m: image mode)"
+                        } else {
+                            "image/chart (k: kitty-reader)"
+                        };
+                        non_text_placeholder(width, height, hint)
+                    } else {
+                        match text_mode {
+                            ReaderTextMode::Raw => text,
+                            ReaderTextMode::Wrap => wrap_preserving_lines(&text, width as usize),
+                            ReaderTextMode::Reflow => wrap_reflow_text(&text, width as usize),
+                        }
+                    };
                     let lines = text.lines().count() as u16;
                     if lines == 0 {
                         self.scroll = 0;
@@ -2968,6 +3010,124 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     } else {
         lines
     }
+}
+
+fn wrap_preserving_lines(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return text.to_string();
+    }
+
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            out_lines.push(String::new());
+            continue;
+        }
+
+        if looks_preformatted(line) {
+            out_lines.push(line.to_string());
+            continue;
+        }
+
+        out_lines.extend(wrap_text(line, max_width));
+    }
+
+    while out_lines.last().is_some_and(|l| l.is_empty()) {
+        out_lines.pop();
+    }
+
+    out_lines.join("\n")
+}
+
+fn wrap_reflow_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return text.to_string();
+    }
+
+    let mut out_lines: Vec<String> = Vec::new();
+    let mut paragraph = String::new();
+
+    let flush_paragraph = |out_lines: &mut Vec<String>, paragraph: &mut String| {
+        let para = paragraph.trim();
+        if para.is_empty() {
+            paragraph.clear();
+            return;
+        }
+        out_lines.extend(wrap_text(para, max_width));
+        paragraph.clear();
+    };
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            flush_paragraph(&mut out_lines, &mut paragraph);
+            if !out_lines.last().is_some_and(|l| l.is_empty()) {
+                out_lines.push(String::new());
+            }
+            continue;
+        }
+
+        if !paragraph.is_empty() {
+            paragraph.push(' ');
+        }
+        paragraph.push_str(line.trim());
+    }
+
+    flush_paragraph(&mut out_lines, &mut paragraph);
+    while out_lines.last().is_some_and(|l| l.is_empty()) {
+        out_lines.pop();
+    }
+
+    out_lines.join("\n")
+}
+
+fn looks_preformatted(line: &str) -> bool {
+    line.contains('\t') || line.contains("  ")
+}
+
+fn is_non_text_page(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no text found")
+}
+
+fn non_text_placeholder(width: u16, height: u16, label: &str) -> String {
+    let width = width.max(10);
+    let height = height.max(5);
+    let inner_w = (width - 2) as usize;
+    let inner_h = (height - 2) as usize;
+
+    let mut out = String::new();
+    out.push('┌');
+    out.push_str(&"─".repeat(inner_w));
+    out.push('┐');
+
+    let label = label.trim();
+    let label = if label.is_empty() { "image/chart" } else { label };
+
+    for y in 0..inner_h {
+        out.push('\n');
+        out.push('│');
+        if y == inner_h / 2 {
+            let mut label = label.to_string();
+            if label.chars().count() > inner_w {
+                label = label.chars().take(inner_w).collect();
+            }
+            let label_len = label.chars().count();
+            let pad_left = inner_w.saturating_sub(label_len) / 2;
+            let pad_right = inner_w.saturating_sub(label_len).saturating_sub(pad_left);
+            out.push_str(&"░".repeat(pad_left));
+            out.push_str(&label);
+            out.push_str(&"░".repeat(pad_right));
+        } else {
+            out.push_str(&"░".repeat(inner_w));
+        }
+        out.push('│');
+    }
+
+    out.push('\n');
+    out.push('└');
+    out.push_str(&"─".repeat(inner_w));
+    out.push('┘');
+    out
 }
 
 fn option_chip(label: &str, selected: bool, row_selected: bool) -> Span<'static> {

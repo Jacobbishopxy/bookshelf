@@ -10,8 +10,11 @@
 - `crates/engine`: PDF parsing/text extraction and preview rendering.
 - `crates/ui`: terminal UI (ratatui/crossterm) and panels.
 - `crates/test`: shared fixtures/helpers for unit tests.
+- `doc/`: documentation and screenshots.
 - `plan/`: design notes/milestones (not runtime code).
 - `tmp/`: local debug output (git-ignored).
+- `.bookshelf/`: local development DB (git-ignored).
+- `.pdfium/`: local Pdfium runtime (git-ignored).
 
 ## Prerequisites
 
@@ -39,6 +42,11 @@
 - Use helpers from `crates/test` when you need shared fixtures.
 - Add focused unit tests for new logic; run `cargo test --workspace` before opening a PR.
 
+## Task Tracking (Milestones)
+
+- For each specific task, create a markdown checklist in `plan/milestone/` named `xxxx-{task}.md` (e.g., `0007-add-import-flow.md`).
+- Start sub-tasks as unchecked checklist items (`- [ ] ...`); when a sub-task is finished, mark it checked (`- [x] ...`).
+
 ## Commit & Pull Request Guidelines
 
 - Commit subjects follow existing history: emoji + imperative summary (e.g., `✨ Add …`, `✨ Implement …`).
@@ -47,4 +55,4 @@
 ## Security & Configuration Tips
 
 - Local state is stored under the OS config dir via `directories::ProjectDirs` (e.g., `~/.config/bookshelf/bookshelf.db` on Linux).
-- Don’t commit local DBs or debug dumps; keep work in `target/`/`tmp*`/`.cargo-home/` untracked as intended by `.gitignore`.
+- Don’t commit local DBs or debug dumps; keep work in `target/`/`tmp*`/`.cargo-home/`/`.bookshelf/`/`.pdfium/` untracked as intended by `.gitignore`.

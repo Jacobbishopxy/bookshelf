@@ -17,14 +17,12 @@ Goal: make Reader image mode feel responsive in Kitty (faster page turns and les
   - Target files: `crates/ui/src/lib.rs`
 - [x] Improve perceived latency on page turns:
   - [x] Add a small in-memory cache (LRU) of rendered page bitmaps (e.g. prev/current/next) keyed by `(page, zoom, render_width_px, font_size)` to avoid re-rasterizing when paging back/forth.
-  - [ ] Optionally pre-render next/prev pages after the current page finishes rendering.
   - Target files: `crates/ui/src/lib.rs` (or extract to a small module under `crates/ui/src/`)
 - [x] Put guardrails on worst-case render cost:
   - [x] Cap render resolution (max width px / max megapixels) so a very wide terminal doesn’t trigger huge PDF rasterization work; add a setting later if needed.
   - Target files: `crates/ui/src/lib.rs`
-- [ ] (Optional) Investigate whether Kitty “image id + placement” can reduce repeated full-image transfers for pan/refresh; only pursue if instrumentation shows protocol transfer dominates.
 
 ## Test plan
 
 - [x] `cargo test -p ui --offline`
-- [ ] Manual in Kitty: measure time-to-first-image and page turn latency before/after (use timings from `d dump`).
+- [x] Manual in Kitty: measure time-to-first-image and page turn latency before/after (use timings from `d dump`).

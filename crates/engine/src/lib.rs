@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use bookshelf_core::{Book, ReaderMode, TocItem};
+use bookshelf_core::{Book, ReaderMode, ReaderTextMode, TocItem};
 use pdf::content::{Op, TextDrawAdjusted};
 use pdf::file::FileOptions;
 use pdf::font::ToUnicodeMap;
@@ -197,6 +197,19 @@ impl Engine {
         }
     }
 
+    pub fn render_page_text_for_reader(
+        &self,
+        book: &Book,
+        page_index: u32,
+        text_mode: ReaderTextMode,
+    ) -> anyhow::Result<String> {
+        let text = self.render_page_text(book, page_index)?;
+        Ok(match text_mode {
+            ReaderTextMode::Raw | ReaderTextMode::Wrap => text,
+            ReaderTextMode::Reflow => reflow_reader_text(&text),
+        })
+    }
+
     pub fn debug_page_text(&self, book: &Book, page_index: u32) -> anyhow::Result<String> {
         let path = bookshelf_core::decode_path(&book.path);
         let file = FileOptions::cached().open(&path)?;
@@ -310,11 +323,12 @@ impl Engine {
         book: &Book,
         page_index: u32,
         mode: ReaderMode,
+        text_mode: ReaderTextMode,
         _viewport_width_chars: u16,
         _viewport_height_chars: u16,
     ) -> anyhow::Result<String> {
         match mode {
-            ReaderMode::Text => self.render_page_text(book, page_index),
+            ReaderMode::Text => self.render_page_text_for_reader(book, page_index, text_mode),
             ReaderMode::Image => {
                 anyhow::bail!("image mode is rendered in the UI (ratatui-image), not as text")
             }
@@ -754,10 +768,200 @@ fn is_noncharacter(code: u32) -> bool {
     (0xFDD0..=0xFDEF).contains(&code) || (code & 0xFFFF == 0xFFFE) || (code & 0xFFFF == 0xFFFF)
 }
 
+fn reflow_reader_text(raw: &str) -> String {
+    let sanitized = sanitize_extracted_text(raw);
+    let mut lines: Vec<&str> = sanitized.split('\n').collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+
+    let mut trimmed_lens = lines
+        .iter()
+        .map(|line| line.trim().len())
+        .filter(|len| *len > 0)
+        .collect::<Vec<_>>();
+    trimmed_lens.sort_unstable();
+    let typical_len = trimmed_lens
+        .get(trimmed_lens.len() / 2)
+        .copied()
+        .unwrap_or(0);
+
+    let short_threshold = (typical_len as f32 * 0.6).round() as usize;
+
+    let mut out = String::new();
+    let mut paragraph = String::new();
+    let mut prev_len = 0usize;
+    let mut prev_blank = true;
+
+    for raw_line in lines {
+        let had_indent = raw_line.starts_with("  ") || raw_line.starts_with('\t');
+        let line = normalize_line_for_reflow(raw_line);
+        if line.is_empty() {
+            flush_paragraph(&mut out, &mut paragraph, &mut prev_blank);
+            continue;
+        }
+
+        if !paragraph.is_empty() {
+            let starts_new = is_bullet_start(&line)
+                || (had_indent && !prev_blank)
+                || (prev_len > 0
+                    && short_threshold > 0
+                    && prev_len <= short_threshold
+                    && starts_with_uppercase_word(&line));
+
+            if starts_new {
+                flush_paragraph(&mut out, &mut paragraph, &mut prev_blank);
+            }
+        }
+
+        append_reflow_line(&mut paragraph, &line);
+        prev_len = line.len();
+        prev_blank = false;
+    }
+
+    flush_paragraph(&mut out, &mut paragraph, &mut prev_blank);
+    out
+}
+
+fn normalize_line_for_reflow(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut last_was_space = false;
+
+    for ch in line.chars() {
+        if ch == '\u{00AD}' {
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+                last_was_space = true;
+            }
+            continue;
+        }
+
+        out.push(ch);
+        last_was_space = false;
+    }
+
+    out.trim().to_string()
+}
+
+fn flush_paragraph(out: &mut String, paragraph: &mut String, prev_blank: &mut bool) {
+    let text = paragraph.trim();
+    if text.is_empty() {
+        return;
+    }
+
+    if !out.is_empty() {
+        out.push('\n');
+        out.push('\n');
+    } else if *prev_blank {
+        // no-op: avoid leading blank paragraphs
+    }
+
+    out.push_str(text);
+    paragraph.clear();
+    *prev_blank = true;
+}
+
+fn append_reflow_line(paragraph: &mut String, line: &str) {
+    if paragraph.is_empty() {
+        paragraph.push_str(line);
+        return;
+    }
+
+    if paragraph.ends_with('-') && should_dehyphenate(paragraph, line) {
+        paragraph.pop();
+        paragraph.push_str(line);
+        return;
+    }
+
+    if !paragraph.ends_with(' ') {
+        paragraph.push(' ');
+    }
+    paragraph.push_str(line);
+}
+
+fn should_dehyphenate(paragraph: &str, next: &str) -> bool {
+    if paragraph.ends_with("--") {
+        return false;
+    }
+
+    let prev = paragraph
+        .chars()
+        .rev()
+        .nth(1)
+        .is_some_and(|ch| ch.is_alphabetic());
+    let next = next.chars().next().is_some_and(|ch| ch.is_alphabetic());
+    prev && next
+}
+
+fn is_bullet_start(line: &str) -> bool {
+    let line = line.trim_start();
+    if line.starts_with(['•', '-', '*', '–', '—']) {
+        return line.chars().nth(1).is_some_and(|ch| ch.is_whitespace());
+    }
+
+    let mut chars = line.chars().peekable();
+    let mut saw_digit = false;
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            let _ = chars.next();
+            continue;
+        }
+        break;
+    }
+    if !saw_digit {
+        return false;
+    }
+
+    matches!(chars.next(), Some('.') | Some(')'))
+        && chars.peek().copied().is_some_and(|ch| ch.is_whitespace())
+}
+
+fn starts_with_uppercase_word(line: &str) -> bool {
+    for ch in line.chars() {
+        if !ch.is_alphabetic() {
+            continue;
+        }
+        return ch.is_uppercase();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn reflow_joins_lines() {
+        let input = "Hello\nworld\n";
+        assert_eq!(reflow_reader_text(input), "Hello world");
+    }
+
+    #[test]
+    fn reflow_preserves_blank_lines() {
+        let input = "Hello\n\nWorld\n";
+        assert_eq!(reflow_reader_text(input), "Hello\n\nWorld");
+    }
+
+    #[test]
+    fn reflow_dehyphenates_line_breaks() {
+        let input = "micro-\nscopic\n";
+        assert_eq!(reflow_reader_text(input), "microscopic");
+    }
+
+    #[test]
+    fn reflow_breaks_on_short_line_then_caps() {
+        let input = "This is a longer line with words\nShort.\nNext Paragraph starts here\n";
+        assert_eq!(
+            reflow_reader_text(input),
+            "This is a longer line with words Short.\n\nNext Paragraph starts here"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

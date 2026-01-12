@@ -7,5 +7,5 @@
 - [x] Split settings: `PreviewMode` stays `text/braille/blocks`, new `ReaderMode` is `text/image` (`crates/core/src/lib.rs`)
 - [x] Persist `reader_mode` in sqlite and migrate legacy `preview_mode='image'` (`crates/storage/src/lib.rs`)
 - [x] Keep Preview limited to text/character-art; use `ReaderMode` for Reader rendering (`crates/engine/src/lib.rs`, `crates/ui/src/lib.rs`)
-- [x] Update preview rendering investigation note (`plan/preview-rendering.md`)
+- [x] Update reader mode rendering note (`plan/reader-mode-rendering.md`)
 - [x] Run `cargo test --workspace --offline`

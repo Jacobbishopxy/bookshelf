@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use anyhow::Context as _;
-use bookshelf_core::{Book, Bookmark, KittyImageQuality, Note, ReaderMode, ScanScope, Settings};
+use bookshelf_core::{
+    Book, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, ScanScope, Settings,
+};
 use rusqlite::{Connection, OptionalExtension as _};
 
 #[derive(Debug)]
@@ -31,6 +33,7 @@ impl Storage {
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 reader_mode TEXT NOT NULL DEFAULT 'text',
+                reader_text_mode TEXT NOT NULL DEFAULT 'reflow',
                 kitty_image_quality TEXT NOT NULL DEFAULT 'balanced',
                 scan_scope TEXT NOT NULL DEFAULT 'recursive',
                 library_roots_json TEXT NOT NULL DEFAULT '[]'
@@ -106,6 +109,19 @@ impl Storage {
         }
 
         match self.conn.execute(
+            "ALTER TABLE settings ADD COLUMN reader_text_mode TEXT NOT NULL DEFAULT 'reflow'",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err).context("add settings.reader_text_mode column");
+                }
+            }
+        }
+
+        match self.conn.execute(
             "ALTER TABLE settings ADD COLUMN kitty_image_quality TEXT NOT NULL DEFAULT 'balanced'",
             [],
         ) {
@@ -138,22 +154,31 @@ impl Storage {
         let row = self
             .conn
             .query_row(
-                "SELECT reader_mode, kitty_image_quality, scan_scope, library_roots_json FROM settings WHERE id = 1",
+                "SELECT reader_mode, reader_text_mode, kitty_image_quality, scan_scope, library_roots_json FROM settings WHERE id = 1",
                 [],
                 |row| {
                     let reader_mode: String = row.get(0)?;
-                    let kitty_image_quality: String = row.get(1)?;
-                    let scan_scope: String = row.get(2)?;
-                    let library_roots_json: String = row.get(3)?;
-                    Ok((reader_mode, kitty_image_quality, scan_scope, library_roots_json))
+                    let reader_text_mode: String = row.get(1)?;
+                    let kitty_image_quality: String = row.get(2)?;
+                    let scan_scope: String = row.get(3)?;
+                    let library_roots_json: String = row.get(4)?;
+                    Ok((
+                        reader_mode,
+                        reader_text_mode,
+                        kitty_image_quality,
+                        scan_scope,
+                        library_roots_json,
+                    ))
                 },
             )
             .optional()?;
 
-        let (reader_mode, kitty_image_quality, scan_scope, library_roots_json) = match row {
+        let (reader_mode, reader_text_mode, kitty_image_quality, scan_scope, library_roots_json) =
+            match row {
             Some(value) => value,
             None => (
                 "text".to_string(),
+                "reflow".to_string(),
                 "balanced".to_string(),
                 "recursive".to_string(),
                 "[]".to_string(),
@@ -163,6 +188,9 @@ impl Storage {
         let reader_mode = reader_mode
             .parse::<ReaderMode>()
             .unwrap_or(ReaderMode::Text);
+        let reader_text_mode = reader_text_mode
+            .parse::<ReaderTextMode>()
+            .unwrap_or(ReaderTextMode::Reflow);
         let kitty_image_quality = kitty_image_quality
             .parse::<KittyImageQuality>()
             .unwrap_or(KittyImageQuality::Balanced);
@@ -174,6 +202,7 @@ impl Storage {
 
         let mut settings = Settings {
             reader_mode,
+            reader_text_mode,
             kitty_image_quality,
             scan_scope,
             library_roots,
@@ -188,9 +217,10 @@ impl Storage {
         let library_roots_json = serde_json::to_string(&settings.library_roots)?;
 
         self.conn.execute(
-            "UPDATE settings SET reader_mode = ?, kitty_image_quality = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
+            "UPDATE settings SET reader_mode = ?, reader_text_mode = ?, kitty_image_quality = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
             (
                 settings.reader_mode.as_str(),
+                settings.reader_text_mode.as_str(),
                 settings.kitty_image_quality.as_str(),
                 settings.scan_scope.as_str(),
                 library_roots_json,
@@ -360,6 +390,7 @@ mod tests {
         let storage = open_in_memory()?;
         let mut settings = storage.load_settings()?;
         settings.reader_mode = ReaderMode::Image;
+        settings.reader_text_mode = ReaderTextMode::Raw;
         settings.kitty_image_quality = KittyImageQuality::Sharp;
         settings.scan_scope = ScanScope::Direct;
         settings.library_roots = vec!["/tmp".to_string()];
@@ -367,6 +398,7 @@ mod tests {
 
         let settings2 = storage.load_settings()?;
         assert_eq!(settings2.reader_mode, ReaderMode::Image);
+        assert_eq!(settings2.reader_text_mode, ReaderTextMode::Raw);
         assert_eq!(settings2.kitty_image_quality, KittyImageQuality::Sharp);
         assert_eq!(settings2.scan_scope, ScanScope::Direct);
         assert_eq!(settings2.library_roots, vec!["/tmp".to_string()]);
