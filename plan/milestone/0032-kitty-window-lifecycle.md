@@ -15,4 +15,4 @@ Goal: if Bookshelf spawns a Kitty reader window from a non-Kitty terminal, closi
 ## Test plan
 
 - [x] `cargo test -p ui --offline`
-- [ ] Manual: run in a non-Kitty terminal → in Reader press `k` → spawned Kitty opens → quit main app → Kitty window closes.
+- [x] Manual: run in a non-Kitty terminal → in Reader press `k` → spawned Kitty opens → quit main app → Kitty window closes.

@@ -14,7 +14,7 @@ In Kitty image mode the slow path is often building/sending the Kitty graphics p
 
 ## Follow-ups
 
-- [ ] Add a user-facing quality setting (e.g. `Fast / Balanced / Sharp`) that maps to a max transmitted megapixels (or scale), so users can trade sharpness for speed.
+- [x] Add a user-facing quality setting (e.g. `Fast / Balanced / Sharp`) that maps to a max transmitted megapixels (or scale), so users can trade sharpness for speed.
 
 ## Test plan
 

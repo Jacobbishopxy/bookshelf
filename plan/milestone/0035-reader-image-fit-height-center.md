@@ -10,7 +10,7 @@ Goal: in Kitty image mode, render the page centered and sized based on the `Page
 
 ## Test plan
 
-- [ ] Manual in Kitty: open a portrait page in a wide terminal → image should be centered and use the full frame height (with side margins).
-- [ ] Manual: zoom/pan path should still center the transmitted image area.
-- [ ] `cargo test -p ui --offline`
-- [ ] `cargo test -p engine --offline`
+- [x] Manual in Kitty: open a portrait page in a wide terminal → image should be centered and use the full frame height (with side margins).
+- [x] Manual: zoom/pan path should still center the transmitted image area.
+- [x] `cargo test -p ui --offline`
+- [x] `cargo test -p engine --offline`

@@ -1,10 +1,11 @@
 //! Test helpers and fixtures.
 
-use bookshelf_core::{ReaderMode, ScanScope, Settings};
+use bookshelf_core::{KittyImageQuality, ReaderMode, ScanScope, Settings};
 
 pub fn make_settings() -> Settings {
     Settings {
         reader_mode: ReaderMode::Text,
+        kitty_image_quality: KittyImageQuality::Balanced,
         scan_scope: ScanScope::Recursive,
         library_roots: Vec::new(),
     }

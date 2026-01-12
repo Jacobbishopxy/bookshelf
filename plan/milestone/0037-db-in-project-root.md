@@ -9,4 +9,4 @@ Goal: use a per-project SQLite database under the repo/project directory instead
 
 ## Test plan
 
-- [ ] `cargo run` from the project root and confirm `./.bookshelf/bookshelf.db` is created.
+- [x] `cargo run` from the project root and confirm `./.bookshelf/bookshelf.db` is created.

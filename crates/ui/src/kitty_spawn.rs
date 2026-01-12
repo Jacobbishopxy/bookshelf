@@ -26,7 +26,8 @@ struct ReaderBootstrap<'a> {
 }
 
 fn spawn_kitty(exe: PathBuf, reader: Option<ReaderBootstrap<'_>>) -> anyhow::Result<Child> {
-    let kitty = find_kitty_executable().ok_or_else(|| anyhow::anyhow!("`kitty` not found on PATH"))?;
+    let kitty =
+        find_kitty_executable().ok_or_else(|| anyhow::anyhow!("`kitty` not found on PATH"))?;
 
     let mut cmd = Command::new(kitty);
     cmd.arg("--title").arg("bookshelf").arg("--").arg(exe);
@@ -41,7 +42,10 @@ fn spawn_kitty(exe: PathBuf, reader: Option<ReaderBootstrap<'_>>) -> anyhow::Res
     if let Some(reader) = reader {
         cmd.env("BOOKSHELF_BOOT_READER", "1");
         cmd.env("BOOKSHELF_BOOT_READER_PATH", reader.book_path);
-        cmd.env("BOOKSHELF_BOOT_READER_PAGE_INDEX", reader.page_index.to_string());
+        cmd.env(
+            "BOOKSHELF_BOOT_READER_PAGE_INDEX",
+            reader.page_index.to_string(),
+        );
         cmd.env("BOOKSHELF_BOOT_READER_MODE", "image");
     }
 
@@ -100,10 +104,8 @@ mod tests {
 
     #[test]
     fn finds_kitty_on_path() {
-        let base = std::env::temp_dir().join(format!(
-            "bookshelf-kitty-spawn-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("bookshelf-kitty-spawn-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
         let bin = base.join("kitty");

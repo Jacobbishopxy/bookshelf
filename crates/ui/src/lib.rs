@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{Bookmark, Note, ReaderMode, Settings, TocItem};
+use bookshelf_core::{Bookmark, KittyImageQuality, Note, ReaderMode, Settings, TocItem};
 use bookshelf_engine::Engine;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
@@ -988,15 +988,36 @@ impl Ui {
                 Ok(None)
             }
             KeyCode::Down => {
-                self.settings_panel.selected = 0;
+                self.settings_panel.selected = (self.settings_panel.selected + 1)
+                    .min(SETTINGS_MENU_ITEM_COUNT.saturating_sub(1));
+                Ok(None)
+            }
+            KeyCode::Left => {
+                if self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY {
+                    self.ctx.settings.cycle_kitty_image_quality_prev();
+                }
+                Ok(None)
+            }
+            KeyCode::Right => {
+                if self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY {
+                    self.ctx.settings.cycle_kitty_image_quality_next();
+                }
                 Ok(None)
             }
             KeyCode::Enter => {
-                self.scan_panel.open = true;
-                self.scan_panel.selected = 0;
-                self.scan_panel.input = join_roots(&self.ctx.settings);
-                self.scan_panel.error = None;
-                self.settings_panel.open = false;
+                match self.settings_panel.selected {
+                    SETTINGS_MENU_SCAN_PATHS => {
+                        self.scan_panel.open = true;
+                        self.scan_panel.selected = 0;
+                        self.scan_panel.input = join_roots(&self.ctx.settings);
+                        self.scan_panel.error = None;
+                        self.settings_panel.open = false;
+                    }
+                    SETTINGS_MENU_KITTY_IMAGE_QUALITY => {
+                        self.ctx.settings.cycle_kitty_image_quality_next();
+                    }
+                    _ => {}
+                }
                 Ok(None)
             }
             _ => Ok(None),
@@ -1861,22 +1882,76 @@ impl Ui {
             Style::default().add_modifier(Modifier::BOLD),
         ));
 
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(inner);
+
         let highlight_style = Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
 
-        let items = vec![ListItem::new(Line::raw("Scan Paths"))];
+        let kitty_quality_row_selected =
+            self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY;
+        let items = vec![
+            ListItem::new(Line::raw("Scan Paths")),
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    "Kitty image quality: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                option_chip(
+                    "fast",
+                    self.ctx.settings.kitty_image_quality == KittyImageQuality::Fast,
+                    kitty_quality_row_selected,
+                ),
+                Span::raw(" "),
+                option_chip(
+                    "balanced",
+                    self.ctx.settings.kitty_image_quality == KittyImageQuality::Balanced,
+                    kitty_quality_row_selected,
+                ),
+                Span::raw(" "),
+                option_chip(
+                    "sharp",
+                    self.ctx.settings.kitty_image_quality == KittyImageQuality::Sharp,
+                    kitty_quality_row_selected,
+                ),
+            ])),
+        ];
 
         let list = List::new(items)
-            .block(block)
             .highlight_style(highlight_style)
             .highlight_symbol("> ")
-            .highlight_spacing(HighlightSpacing::Always);
+            .highlight_spacing(HighlightSpacing::Always)
+            .block(Block::default());
 
         let mut state = ListState::default();
-        state.select(Some(0));
-        frame.render_stateful_widget(list, popup_area, &mut state);
+        state.select(Some(
+            self.settings_panel
+                .selected
+                .min(SETTINGS_MENU_ITEM_COUNT.saturating_sub(1)),
+        ));
+        frame.render_stateful_widget(list, sections[0], &mut state);
+
+        let help_lines = vec![Line::from(vec![
+            Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" select  "),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" open/toggle  "),
+            Span::styled("←/→", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" adjust  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" close"),
+        ])];
+        let help = Paragraph::new(Text::from(help_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(help, sections[1]);
     }
 
     fn draw_library(&self, frame: &mut ratatui::Frame, area: Rect) {
@@ -2123,6 +2198,10 @@ struct SettingsPanel {
     open: bool,
     selected: usize,
 }
+
+const SETTINGS_MENU_SCAN_PATHS: usize = 0;
+const SETTINGS_MENU_KITTY_IMAGE_QUALITY: usize = 1;
+const SETTINGS_MENU_ITEM_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Default)]
 struct SearchPanel {
@@ -2480,12 +2559,12 @@ impl ReaderPanel {
                     self.image_pan_x_px = pan_x_px;
                     self.image_pan_y_px = pan_y_px;
 
-                    const MAX_KITTY_TRANSMIT_PIXELS: u64 = 1_250_000;
+                    let max_transmit_px = ctx.settings.kitty_image_quality.max_transmit_pixels();
                     let (transmit_image, transmit_px) = {
                         let px = u64::from(view_image.width())
                             .saturating_mul(u64::from(view_image.height()));
-                        if image_protocol::in_kitty_env() && px > MAX_KITTY_TRANSMIT_PIXELS {
-                            let scale = (MAX_KITTY_TRANSMIT_PIXELS as f64 / px.max(1) as f64)
+                        if image_protocol::in_kitty_env() && px > max_transmit_px {
+                            let scale = (max_transmit_px as f64 / px.max(1) as f64)
                                 .sqrt()
                                 .clamp(0.01, 1.0);
                             let new_w =

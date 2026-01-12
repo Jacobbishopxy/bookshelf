@@ -8,5 +8,5 @@ Goal: in the dedicated Kitty reader window (boot-reader session), pressing `Esc`
 
 ## Test plan
 
-- [ ] Manual: from a non-Kitty terminal → Reader `k` → in spawned Kitty reader press `Esc` → Kitty window closes.
-- [ ] `cargo test -p ui --offline`
+- [x] Manual: from a non-Kitty terminal → Reader `k` → in spawned Kitty reader press `Esc` → Kitty window closes.
+- [x] `cargo test -p ui --offline`

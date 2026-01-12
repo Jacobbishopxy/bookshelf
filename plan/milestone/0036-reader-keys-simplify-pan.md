@@ -16,5 +16,5 @@ Goal: reduce key clutter in Reader mode by removing `h/j/k/l` panning and using 
 
 ## Test plan
 
-- [ ] Manual: in image mode, `Shift+←/→` pans left/right; `←/→` still turns pages.
-- [ ] `cargo test -p ui --offline`
+- [x] Manual: in image mode, `Shift+←/→` pans left/right; `←/→` still turns pages.
+- [x] `cargo test -p ui --offline`

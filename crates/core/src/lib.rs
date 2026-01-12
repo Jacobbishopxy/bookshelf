@@ -96,6 +96,7 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 #[serde(default)]
 pub struct Settings {
     pub reader_mode: ReaderMode,
+    pub kitty_image_quality: KittyImageQuality,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
 }
@@ -105,6 +106,14 @@ pub struct Settings {
 pub enum ReaderMode {
     Text,
     Image,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KittyImageQuality {
+    Fast,
+    Balanced,
+    Sharp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +132,47 @@ impl ReaderMode {
     }
 }
 
+impl KittyImageQuality {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            KittyImageQuality::Fast => "fast",
+            KittyImageQuality::Balanced => "balanced",
+            KittyImageQuality::Sharp => "sharp",
+        }
+    }
+
+    pub fn max_transmit_pixels(&self) -> u64 {
+        match self {
+            KittyImageQuality::Fast => 750_000,
+            KittyImageQuality::Balanced => 1_250_000,
+            KittyImageQuality::Sharp => 2_500_000,
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            KittyImageQuality::Fast => KittyImageQuality::Balanced,
+            KittyImageQuality::Balanced => KittyImageQuality::Sharp,
+            KittyImageQuality::Sharp => KittyImageQuality::Fast,
+        }
+    }
+
+    pub fn prev(&self) -> Self {
+        match self {
+            KittyImageQuality::Fast => KittyImageQuality::Sharp,
+            KittyImageQuality::Balanced => KittyImageQuality::Fast,
+            KittyImageQuality::Sharp => KittyImageQuality::Balanced,
+        }
+    }
+}
+
 impl std::fmt::Display for ReaderMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::fmt::Display for KittyImageQuality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -137,6 +186,19 @@ impl std::str::FromStr for ReaderMode {
             "text" => Ok(ReaderMode::Text),
             "image" => Ok(ReaderMode::Image),
             _ => Err("unknown reader mode"),
+        }
+    }
+}
+
+impl std::str::FromStr for KittyImageQuality {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "fast" => Ok(KittyImageQuality::Fast),
+            "balanced" => Ok(KittyImageQuality::Balanced),
+            "sharp" => Ok(KittyImageQuality::Sharp),
+            _ => Err("unknown kitty image quality"),
         }
     }
 }
@@ -172,6 +234,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             reader_mode: ReaderMode::Text,
+            kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
         }
@@ -195,6 +258,14 @@ impl Settings {
             ReaderMode::Text => ReaderMode::Image,
             ReaderMode::Image => ReaderMode::Text,
         };
+    }
+
+    pub fn cycle_kitty_image_quality_next(&mut self) {
+        self.kitty_image_quality = self.kitty_image_quality.next();
+    }
+
+    pub fn cycle_kitty_image_quality_prev(&mut self) {
+        self.kitty_image_quality = self.kitty_image_quality.prev();
     }
 
     pub fn cycle_scan_scope(&mut self) {
@@ -296,6 +367,7 @@ mod tests {
     fn settings_normalizes_depth() {
         let mut settings = Settings {
             reader_mode: ReaderMode::Text,
+            kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Direct,
             library_roots: vec![
                 " ".to_string(),
@@ -309,6 +381,19 @@ mod tests {
             settings.library_roots,
             vec!["/a".to_string(), "/b".to_string()]
         );
+    }
+
+    #[test]
+    fn kitty_image_quality_parses_strings() {
+        assert_eq!(
+            "fast".parse::<KittyImageQuality>().unwrap(),
+            KittyImageQuality::Fast
+        );
+        assert_eq!(
+            " Sharp ".parse::<KittyImageQuality>().unwrap(),
+            KittyImageQuality::Sharp
+        );
+        assert!("nope".parse::<KittyImageQuality>().is_err());
     }
 
     #[test]

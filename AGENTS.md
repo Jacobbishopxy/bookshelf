@@ -13,6 +13,11 @@
 - `plan/`: design notes/milestones (not runtime code).
 - `tmp/`: local debug output (git-ignored).
 
+## Prerequisites
+
+- Developers: install Pdfium first (`bash scripts/pdfium/fetch_and_probe.sh`) — `crates/engine` requires a local Pdfium shared library at build time.
+- Users: install Kitty first for Reader image mode (use `bash scripts/kitty/install.sh` and ensure `~/.local/kitty.app/bin` is on `PATH`).
+
 ## Build, Test, and Development Commands
 
 - `cargo run`: run the app (workspace default).
