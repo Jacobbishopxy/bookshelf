@@ -34,6 +34,7 @@ impl Storage {
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 reader_mode TEXT NOT NULL DEFAULT 'text',
                 reader_text_mode TEXT NOT NULL DEFAULT 'reflow',
+                reader_trim_headers_footers INTEGER NOT NULL DEFAULT 1,
                 kitty_image_quality TEXT NOT NULL DEFAULT 'balanced',
                 scan_scope TEXT NOT NULL DEFAULT 'recursive',
                 library_roots_json TEXT NOT NULL DEFAULT '[]'
@@ -122,6 +123,19 @@ impl Storage {
         }
 
         match self.conn.execute(
+            "ALTER TABLE settings ADD COLUMN reader_trim_headers_footers INTEGER NOT NULL DEFAULT 1",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err).context("add settings.reader_trim_headers_footers column");
+                }
+            }
+        }
+
+        match self.conn.execute(
             "ALTER TABLE settings ADD COLUMN kitty_image_quality TEXT NOT NULL DEFAULT 'balanced'",
             [],
         ) {
@@ -154,17 +168,19 @@ impl Storage {
         let row = self
             .conn
             .query_row(
-                "SELECT reader_mode, reader_text_mode, kitty_image_quality, scan_scope, library_roots_json FROM settings WHERE id = 1",
+                "SELECT reader_mode, reader_text_mode, reader_trim_headers_footers, kitty_image_quality, scan_scope, library_roots_json FROM settings WHERE id = 1",
                 [],
                 |row| {
                     let reader_mode: String = row.get(0)?;
                     let reader_text_mode: String = row.get(1)?;
-                    let kitty_image_quality: String = row.get(2)?;
-                    let scan_scope: String = row.get(3)?;
-                    let library_roots_json: String = row.get(4)?;
+                    let reader_trim_headers_footers: i64 = row.get(2)?;
+                    let kitty_image_quality: String = row.get(3)?;
+                    let scan_scope: String = row.get(4)?;
+                    let library_roots_json: String = row.get(5)?;
                     Ok((
                         reader_mode,
                         reader_text_mode,
+                        reader_trim_headers_footers,
                         kitty_image_quality,
                         scan_scope,
                         library_roots_json,
@@ -173,12 +189,19 @@ impl Storage {
             )
             .optional()?;
 
-        let (reader_mode, reader_text_mode, kitty_image_quality, scan_scope, library_roots_json) =
-            match row {
+        let (
+            reader_mode,
+            reader_text_mode,
+            reader_trim_headers_footers,
+            kitty_image_quality,
+            scan_scope,
+            library_roots_json,
+        ) = match row {
             Some(value) => value,
             None => (
                 "text".to_string(),
                 "reflow".to_string(),
+                1,
                 "balanced".to_string(),
                 "recursive".to_string(),
                 "[]".to_string(),
@@ -194,6 +217,7 @@ impl Storage {
         let kitty_image_quality = kitty_image_quality
             .parse::<KittyImageQuality>()
             .unwrap_or(KittyImageQuality::Balanced);
+        let reader_trim_headers_footers = reader_trim_headers_footers != 0;
         let scan_scope = scan_scope
             .parse::<ScanScope>()
             .unwrap_or(ScanScope::Recursive);
@@ -203,6 +227,7 @@ impl Storage {
         let mut settings = Settings {
             reader_mode,
             reader_text_mode,
+            reader_trim_headers_footers,
             kitty_image_quality,
             scan_scope,
             library_roots,
@@ -217,10 +242,11 @@ impl Storage {
         let library_roots_json = serde_json::to_string(&settings.library_roots)?;
 
         self.conn.execute(
-            "UPDATE settings SET reader_mode = ?, reader_text_mode = ?, kitty_image_quality = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
+            "UPDATE settings SET reader_mode = ?, reader_text_mode = ?, reader_trim_headers_footers = ?, kitty_image_quality = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
             (
                 settings.reader_mode.as_str(),
                 settings.reader_text_mode.as_str(),
+                i64::from(settings.reader_trim_headers_footers),
                 settings.kitty_image_quality.as_str(),
                 settings.scan_scope.as_str(),
                 library_roots_json,
@@ -391,6 +417,7 @@ mod tests {
         let mut settings = storage.load_settings()?;
         settings.reader_mode = ReaderMode::Image;
         settings.reader_text_mode = ReaderTextMode::Raw;
+        settings.reader_trim_headers_footers = false;
         settings.kitty_image_quality = KittyImageQuality::Sharp;
         settings.scan_scope = ScanScope::Direct;
         settings.library_roots = vec!["/tmp".to_string()];
@@ -399,6 +426,7 @@ mod tests {
         let settings2 = storage.load_settings()?;
         assert_eq!(settings2.reader_mode, ReaderMode::Image);
         assert_eq!(settings2.reader_text_mode, ReaderTextMode::Raw);
+        assert!(!settings2.reader_trim_headers_footers);
         assert_eq!(settings2.kitty_image_quality, KittyImageQuality::Sharp);
         assert_eq!(settings2.scan_scope, ScanScope::Direct);
         assert_eq!(settings2.library_roots, vec!["/tmp".to_string()]);

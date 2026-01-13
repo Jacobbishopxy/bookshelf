@@ -97,9 +97,15 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
 pub struct Settings {
     pub reader_mode: ReaderMode,
     pub reader_text_mode: ReaderTextMode,
+    #[serde(default = "default_reader_trim_headers_footers")]
+    pub reader_trim_headers_footers: bool,
     pub kitty_image_quality: KittyImageQuality,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
+}
+
+fn default_reader_trim_headers_footers() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,6 +287,7 @@ impl Default for Settings {
         Self {
             reader_mode: ReaderMode::Text,
             reader_text_mode: ReaderTextMode::Reflow,
+            reader_trim_headers_footers: true,
             kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
@@ -313,6 +320,10 @@ impl Settings {
             ReaderTextMode::Wrap => ReaderTextMode::Reflow,
             ReaderTextMode::Reflow => ReaderTextMode::Raw,
         };
+    }
+
+    pub fn toggle_reader_trim_headers_footers(&mut self) {
+        self.reader_trim_headers_footers = !self.reader_trim_headers_footers;
     }
 
     pub fn cycle_kitty_image_quality_next(&mut self) {
@@ -434,6 +445,7 @@ mod tests {
         let mut settings = Settings {
             reader_mode: ReaderMode::Text,
             reader_text_mode: ReaderTextMode::Reflow,
+            reader_trim_headers_footers: true,
             kitty_image_quality: KittyImageQuality::Balanced,
             scan_scope: ScanScope::Direct,
             library_roots: vec![

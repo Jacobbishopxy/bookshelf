@@ -13,7 +13,7 @@ use bookshelf_application::AppContext;
 use bookshelf_core::{
     Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings, TocItem,
 };
-use bookshelf_engine::Engine;
+use bookshelf_engine::{Engine, PageFurniture};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{event, terminal};
@@ -527,6 +527,19 @@ impl Ui {
                     self.reader.invalidate_render();
                     self.reader.notice =
                         Some(format!("text: {}", self.ctx.settings.reader_text_mode));
+                }
+                Ok(None)
+            }
+            KeyCode::Char('h') => {
+                if self.ctx.settings.reader_mode == ReaderMode::Text {
+                    self.ctx.settings.toggle_reader_trim_headers_footers();
+                    self.reader.invalidate_render();
+                    let status = if self.ctx.settings.reader_trim_headers_footers {
+                        "on"
+                    } else {
+                        "off"
+                    };
+                    self.reader.notice = Some(format!("trim headers/footers: {status}"));
                 }
                 Ok(None)
             }
@@ -1800,6 +1813,13 @@ impl Ui {
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             footer_spans.push(Span::raw(" raw/wrap/reflow"));
+
+            footer_spans.push(Span::raw("  "));
+            footer_spans.push(Span::styled(
+                "h",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            footer_spans.push(Span::raw(" trim-hf"));
         }
 
         if self.ctx.settings.reader_mode == ReaderMode::Image {
@@ -2327,6 +2347,7 @@ struct ReaderPanel {
     image_pan_y_px: u32,
     page_image: Option<CachedPageImage>,
     page_image_cache: VecDeque<CachedPageImage>,
+    page_furniture: Option<PageFurniture>,
     current_text: Option<String>,
     current_image: Option<ImageProtocol>,
     last_error: Option<String>,
@@ -2350,6 +2371,7 @@ impl Default for ReaderPanel {
             image_pan_y_px: 0,
             page_image: None,
             page_image_cache: VecDeque::new(),
+            page_furniture: None,
             current_text: None,
             current_image: None,
             last_error: None,
@@ -2367,6 +2389,7 @@ impl ReaderPanel {
         self.book_path = Some(book.path.clone());
         self.book_title = Some(book.title.clone());
         self.page_image_cache.clear();
+        self.page_furniture = None;
         let saved = ctx.progress_by_path.get(&book.path).copied().unwrap_or(1);
         self.page = saved.saturating_sub(1);
         self.total_pages = engine.page_count(book).ok();
@@ -2696,8 +2719,28 @@ impl ReaderPanel {
                     }
                 }
             }
-            _ => match engine.render_page_for_reader(&book, self.page, mode, text_mode, width, height)
-            {
+            _ => {
+                let furniture = if mode == ReaderMode::Text
+                    && text_mode != ReaderTextMode::Raw
+                    && ctx.settings.reader_trim_headers_footers
+                {
+                    if self.page_furniture.is_none() {
+                        self.page_furniture = engine.detect_page_furniture(&book).ok();
+                    }
+                    self.page_furniture.as_ref()
+                } else {
+                    None
+                };
+
+                match engine.render_page_for_reader(
+                    &book,
+                    self.page,
+                    mode,
+                    text_mode,
+                    furniture,
+                    width,
+                    height,
+                ) {
                 Ok(text) => {
                     let text = if is_non_text_page(&text) {
                         let kitty_ok = image_protocol::kitty_supported(picker);
@@ -2731,7 +2774,8 @@ impl ReaderPanel {
                     self.last_error = Some(err.to_string());
                     self.last_image_timings = None;
                 }
-            },
+                }
+            }
         }
 
         self.render_key = Some(key);

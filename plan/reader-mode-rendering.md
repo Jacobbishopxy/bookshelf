@@ -131,7 +131,7 @@ Key API points from the crate (source: `ratatui-image` v10.0.2):
 - render with `StatefulImage` (`Frame::render_stateful_widget`)
 - for responsiveness, use `thread::ThreadProtocol` to offload resize+encode (and only render on UI thread)
 
-#### PDF → image: how to feed ratatui-image
+### PDF → image: how to feed ratatui-image
 
 Bookshelf rasterizes via Pdfium. For ratatui-image, produce an RGBA `DynamicImage`:
 
@@ -149,7 +149,7 @@ Bookshelf rasterizes via Pdfium. For ratatui-image, produce an RGBA `DynamicImag
 
 This gives near-original output on terminals with real image protocols.
 
-#### Fallback behavior and feature flags
+### Fallback behavior and feature flags
 
 By default, `ratatui-image` enables `chafa-dyn` (see README / `protocol/halfblocks.rs`), which requires `libchafa` at runtime.
 

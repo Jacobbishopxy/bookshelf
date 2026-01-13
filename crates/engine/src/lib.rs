@@ -1,7 +1,7 @@
 //! PDF engine wrapper.
 
 use std::cell::{Ref, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +20,25 @@ use pdfium_render::prelude::{PdfBitmapFormat, PdfRenderConfig, Pdfium};
 #[derive(Debug, Default)]
 pub struct Engine {
     pdfium: RefCell<PdfiumState>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PageFurniture {
+    header_lines: HashSet<String>,
+    footer_lines: HashSet<String>,
+}
+
+const PAGE_FURNITURE_SAMPLE_PAGES: u32 = 8;
+const PAGE_FURNITURE_TOP_K: usize = 3;
+const PAGE_FURNITURE_BOTTOM_K: usize = 3;
+const PAGE_FURNITURE_MIN_FRACTION: f32 = 0.6;
+
+const TJ_INSERT_SPACE_THRESHOLD: f32 = -200.0;
+
+impl PageFurniture {
+    pub fn is_empty(&self) -> bool {
+        self.header_lines.is_empty() && self.footer_lines.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -202,11 +221,73 @@ impl Engine {
         book: &Book,
         page_index: u32,
         text_mode: ReaderTextMode,
+        furniture: Option<&PageFurniture>,
     ) -> anyhow::Result<String> {
-        let text = self.render_page_text(book, page_index)?;
+        let raw = self.render_page_text(book, page_index)?;
+        let trimmed = if text_mode == ReaderTextMode::Raw {
+            raw
+        } else if let Some(furniture) = furniture
+            && !furniture.is_empty()
+        {
+            trim_page_furniture(&raw, furniture)
+        } else {
+            raw
+        };
+
         Ok(match text_mode {
-            ReaderTextMode::Raw | ReaderTextMode::Wrap => text,
-            ReaderTextMode::Reflow => reflow_reader_text(&text),
+            ReaderTextMode::Raw | ReaderTextMode::Wrap => trimmed,
+            ReaderTextMode::Reflow => reflow_reader_text(&trimmed),
+        })
+    }
+
+    pub fn detect_page_furniture(&self, book: &Book) -> anyhow::Result<PageFurniture> {
+        let total_pages = self
+            .page_count(book)
+            .ok()
+            .unwrap_or(PAGE_FURNITURE_SAMPLE_PAGES);
+        let sample_pages = total_pages.min(PAGE_FURNITURE_SAMPLE_PAGES).max(1);
+
+        let mut sampled_pages = 0u32;
+        let mut header_counts: HashMap<String, u32> = HashMap::new();
+        let mut footer_counts: HashMap<String, u32> = HashMap::new();
+
+        for page_index in 0..sample_pages {
+            let text = match self.render_page_text(book, page_index) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if text.trim().is_empty() || text.trim().eq_ignore_ascii_case("no text found") {
+                continue;
+            }
+            sampled_pages += 1;
+
+            for line in take_top_boundary_lines(&text, PAGE_FURNITURE_TOP_K) {
+                *header_counts.entry(line).or_insert(0) += 1;
+            }
+            for line in take_bottom_boundary_lines(&text, PAGE_FURNITURE_BOTTOM_K) {
+                *footer_counts.entry(line).or_insert(0) += 1;
+            }
+        }
+
+        if sampled_pages < 2 {
+            return Ok(PageFurniture::default());
+        }
+
+        let min_repeats = ((sampled_pages as f32) * PAGE_FURNITURE_MIN_FRACTION).ceil() as u32;
+        let min_repeats = min_repeats.max(2);
+
+        let header_lines = header_counts
+            .into_iter()
+            .filter_map(|(line, count)| (count >= min_repeats).then_some(line))
+            .collect::<HashSet<_>>();
+        let footer_lines = footer_counts
+            .into_iter()
+            .filter_map(|(line, count)| (count >= min_repeats).then_some(line))
+            .collect::<HashSet<_>>();
+
+        Ok(PageFurniture {
+            header_lines,
+            footer_lines,
         })
     }
 
@@ -324,11 +405,14 @@ impl Engine {
         page_index: u32,
         mode: ReaderMode,
         text_mode: ReaderTextMode,
+        furniture: Option<&PageFurniture>,
         _viewport_width_chars: u16,
         _viewport_height_chars: u16,
     ) -> anyhow::Result<String> {
         match mode {
-            ReaderMode::Text => self.render_page_text_for_reader(book, page_index, text_mode),
+            ReaderMode::Text => {
+                self.render_page_text_for_reader(book, page_index, text_mode, furniture)
+            }
             ReaderMode::Image => {
                 anyhow::bail!("image mode is rendered in the UI (ratatui-image), not as text")
             }
@@ -575,9 +659,9 @@ fn dump_text_op(
 fn ops_to_text(ops: &[Op], resolver: &impl Resolve, resources: &Resources) -> String {
     let mut tounicode_cache: HashMap<Name, Option<ToUnicodeMap>> = HashMap::new();
     let mut current_font: Option<Name> = None;
+    let mut pending_space = false;
 
     let mut out = String::new();
-    let mut needs_space = false;
 
     for op in ops {
         match op {
@@ -592,30 +676,37 @@ fn ops_to_text(ops: &[Op], resolver: &impl Resolve, resources: &Resources) -> St
                     resources,
                     &mut tounicode_cache,
                 );
-                append_text(&mut out, &s, &mut needs_space);
+                append_text_piece(&mut out, &s, &mut pending_space);
             }
             Op::TextDrawAdjusted { array } => {
                 for item in array {
-                    if let TextDrawAdjusted::Text(text) = item {
-                        let s = decode_pdf_string(
-                            text,
-                            current_font.as_ref(),
-                            resolver,
-                            resources,
-                            &mut tounicode_cache,
-                        );
-                        append_text(&mut out, &s, &mut needs_space);
+                    match item {
+                        TextDrawAdjusted::Text(text) => {
+                            let s = decode_pdf_string(
+                                text,
+                                current_font.as_ref(),
+                                resolver,
+                                resources,
+                                &mut tounicode_cache,
+                            );
+                            append_text_piece(&mut out, &s, &mut pending_space);
+                        }
+                        TextDrawAdjusted::Spacing(spacing) => {
+                            if *spacing <= TJ_INSERT_SPACE_THRESHOLD {
+                                pending_space = true;
+                            }
+                        }
                     }
                 }
             }
             Op::TextNewline => {
                 out.push('\n');
-                needs_space = false;
+                pending_space = false;
             }
             Op::MoveTextPosition { translation } => {
                 if translation.y < 0.0 {
                     out.push('\n');
-                    needs_space = false;
+                    pending_space = false;
                 }
             }
             _ => {}
@@ -625,18 +716,27 @@ fn ops_to_text(ops: &[Op], resolver: &impl Resolve, resources: &Resources) -> St
     out
 }
 
-fn append_text(out: &mut String, s: &str, needs_space: &mut bool) {
+fn append_text_piece(out: &mut String, s: &str, pending_space: &mut bool) {
     let sanitized = sanitize_extracted_text(s);
     let trimmed = sanitized.trim_matches('\0');
     if trimmed.is_empty() {
         return;
     }
 
-    if *needs_space && !out.ends_with([' ', '\n', '\t']) {
-        out.push(' ');
+    if *pending_space {
+        let first_non_ws = trimmed.chars().find(|ch| !ch.is_whitespace());
+        let suppress_before = first_non_ws
+            .is_some_and(|ch| matches!(ch, ',' | '.' | ';' | ':' | '!' | '?' | ')' | ']' | '}'));
+        if !out.is_empty()
+            && !suppress_before
+            && !out.ends_with([' ', '\n', '\t'])
+            && !trimmed.starts_with(char::is_whitespace)
+        {
+            out.push(' ');
+        }
+        *pending_space = false;
     }
     out.push_str(trimmed);
-    *needs_space = true;
 }
 
 fn decode_pdf_string(
@@ -766,6 +866,107 @@ fn is_private_use(code: u32) -> bool {
 
 fn is_noncharacter(code: u32) -> bool {
     (0xFDD0..=0xFDEF).contains(&code) || (code & 0xFFFF == 0xFFFE) || (code & 0xFFFF == 0xFFFF)
+}
+
+fn take_top_boundary_lines(text: &str, k: usize) -> Vec<String> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(k);
+    for line in text.lines() {
+        let normalized = normalize_line_for_reflow(line);
+        if normalized.is_empty() {
+            continue;
+        }
+        out.push(normalized);
+        if out.len() >= k {
+            break;
+        }
+    }
+    out
+}
+
+fn take_bottom_boundary_lines(text: &str, k: usize) -> Vec<String> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(k);
+    for line in text.lines().rev() {
+        let normalized = normalize_line_for_reflow(line);
+        if normalized.is_empty() {
+            continue;
+        }
+        out.push(normalized);
+        if out.len() >= k {
+            break;
+        }
+    }
+    out.reverse();
+    out
+}
+
+fn trim_page_furniture(text: &str, furniture: &PageFurniture) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("no text found") {
+        return text.to_string();
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return text.to_string();
+    }
+
+    let mut to_remove: HashSet<usize> = HashSet::new();
+
+    let mut header_seen = 0usize;
+    for (idx, line) in lines.iter().enumerate() {
+        let normalized = normalize_line_for_reflow(line);
+        if normalized.is_empty() {
+            continue;
+        }
+        header_seen += 1;
+        if header_seen > PAGE_FURNITURE_TOP_K {
+            break;
+        }
+        if furniture.header_lines.contains(&normalized) {
+            to_remove.insert(idx);
+        }
+    }
+
+    let mut footer_seen = 0usize;
+    for (rev_idx, line) in lines.iter().rev().enumerate() {
+        let normalized = normalize_line_for_reflow(line);
+        if normalized.is_empty() {
+            continue;
+        }
+        footer_seen += 1;
+        if footer_seen > PAGE_FURNITURE_BOTTOM_K {
+            break;
+        }
+        let idx = lines.len().saturating_sub(1 + rev_idx);
+        if furniture.footer_lines.contains(&normalized) {
+            to_remove.insert(idx);
+        }
+    }
+
+    if to_remove.is_empty() {
+        return text.to_string();
+    }
+
+    let out = lines
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, line)| (!to_remove.contains(&idx)).then_some(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if out.trim().is_empty() {
+        text.to_string()
+    } else {
+        out
+    }
 }
 
 fn reflow_reader_text(raw: &str) -> String {
@@ -934,7 +1135,19 @@ fn starts_with_uppercase_word(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf::object::NoResolve;
     use std::path::Path;
+
+    fn empty_resources() -> Resources {
+        Resources {
+            graphics_states: HashMap::new(),
+            color_spaces: HashMap::new(),
+            pattern: HashMap::new(),
+            xobjects: HashMap::new(),
+            fonts: HashMap::new(),
+            properties: HashMap::new(),
+        }
+    }
 
     #[test]
     fn reflow_joins_lines() {
@@ -961,6 +1174,69 @@ mod tests {
             reflow_reader_text(input),
             "This is a longer line with words Short.\n\nNext Paragraph starts here"
         );
+    }
+
+    #[test]
+    fn trim_page_furniture_removes_repeated_boundary_lines() {
+        let mut furniture = PageFurniture::default();
+        furniture.header_lines.insert("Bookshelf".to_string());
+        furniture.footer_lines.insert("Confidential".to_string());
+
+        let input = "Bookshelf\n\nHello world\n\nConfidential";
+        assert_eq!(trim_page_furniture(input, &furniture), "\nHello world\n");
+    }
+
+    #[test]
+    fn trim_page_furniture_does_not_blank_entire_page() {
+        let mut furniture = PageFurniture::default();
+        furniture.header_lines.insert("Header".to_string());
+        furniture.footer_lines.insert("Footer".to_string());
+
+        let input = "Header\n\nFooter";
+        assert_eq!(trim_page_furniture(input, &furniture), input);
+    }
+
+    #[test]
+    fn boundary_lines_skip_blank_lines() {
+        let input = "\n\nTop\n\nBody\n\nBottom\n\n";
+        assert_eq!(
+            take_top_boundary_lines(input, 2),
+            vec!["Top".to_string(), "Body".to_string()]
+        );
+        assert_eq!(
+            take_bottom_boundary_lines(input, 2),
+            vec!["Body".to_string(), "Bottom".to_string()]
+        );
+    }
+
+    #[test]
+    fn ops_to_text_does_not_insert_spaces_between_single_chars() {
+        let resources = empty_resources();
+        let ops = vec![
+            Op::TextDraw {
+                text: PdfString::from("M"),
+            },
+            Op::TextDraw {
+                text: PdfString::from("a"),
+            },
+            Op::TextDraw {
+                text: PdfString::from("t"),
+            },
+        ];
+        assert_eq!(ops_to_text(&ops, &NoResolve, &resources), "Mat");
+    }
+
+    #[test]
+    fn ops_to_text_inserts_space_on_large_tj_spacing() {
+        let resources = empty_resources();
+        let ops = vec![Op::TextDrawAdjusted {
+            array: vec![
+                TextDrawAdjusted::Text(PdfString::from("Hello")),
+                TextDrawAdjusted::Spacing(-300.0),
+                TextDrawAdjusted::Text(PdfString::from("world")),
+            ],
+        }];
+        assert_eq!(ops_to_text(&ops, &NoResolve, &resources), "Hello world");
     }
 
     #[cfg(unix)]

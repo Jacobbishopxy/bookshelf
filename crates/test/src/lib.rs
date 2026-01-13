@@ -6,6 +6,7 @@ pub fn make_settings() -> Settings {
     Settings {
         reader_mode: ReaderMode::Text,
         reader_text_mode: ReaderTextMode::Reflow,
+        reader_trim_headers_footers: true,
         kitty_image_quality: KittyImageQuality::Balanced,
         scan_scope: ScanScope::Recursive,
         library_roots: Vec::new(),
