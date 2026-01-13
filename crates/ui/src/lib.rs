@@ -9,9 +9,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use bookshelf_application::AppContext;
+use bookshelf_application::{AppContext, CollectionFilter, TagMatchMode};
 use bookshelf_core::{
-    Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings, TocItem,
+    Book, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings, TocItem,
 };
 use bookshelf_engine::{Engine, PageFurniture};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -52,6 +52,7 @@ pub struct Ui {
     scan_panel: ScanPathPanel,
     search_panel: SearchPanel,
     label_input_panel: LabelInputPanel,
+    label_browse_panel: LabelBrowsePanel,
     goto_panel: GotoPanel,
     bookmarks_panel: BookmarksPanel,
     notes_panel: NotesPanel,
@@ -72,6 +73,7 @@ impl Ui {
         let scan_panel = ScanPathPanel::new(join_roots(&ctx.settings));
         let search_panel = SearchPanel::default();
         let label_input_panel = LabelInputPanel::default();
+        let label_browse_panel = LabelBrowsePanel::default();
         let goto_panel = GotoPanel::default();
         let bookmarks_panel = BookmarksPanel::default();
         let notes_panel = NotesPanel::default();
@@ -85,6 +87,7 @@ impl Ui {
             scan_panel,
             search_panel,
             label_input_panel,
+            label_browse_panel,
             goto_panel,
             bookmarks_panel,
             notes_panel,
@@ -300,6 +303,13 @@ impl Ui {
                                 exit,
                             });
                         }
+                    } else if self.label_browse_panel.open {
+                        if let Some(exit) = self.handle_label_browse_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
                     } else if self.label_input_panel.open {
                         if let Some(exit) = self.handle_label_input_panel_key(key)? {
                             return Ok(UiOutcome {
@@ -329,8 +339,7 @@ impl Ui {
                 Ok(Some(UiExit::Quit))
             }
             KeyCode::Char('/') => {
-                self.search_panel.open = true;
-                self.normalize_selection_to_visible();
+                self.open_search_panel();
                 Ok(None)
             }
             KeyCode::Char('f') => {
@@ -339,6 +348,7 @@ impl Ui {
                 {
                     book.favorite = !book.favorite;
                     self.ctx.dirty_favorite_paths.insert(book.path.clone());
+                    self.normalize_selection_to_visible();
                 }
                 Ok(None)
             }
@@ -348,6 +358,10 @@ impl Ui {
             }
             KeyCode::Char('c') => {
                 self.open_label_input_panel(LabelInputMode::Collection);
+                Ok(None)
+            }
+            KeyCode::Char('l') => {
+                self.open_label_browse_panel();
                 Ok(None)
             }
             KeyCode::Char('s') => {
@@ -377,58 +391,394 @@ impl Ui {
                 self.select_prev_visible();
                 Ok(None)
             }
+            KeyCode::Left | KeyCode::Right => {
+                self.ctx.favorites_only = !self.ctx.favorites_only;
+                self.normalize_selection_to_visible();
+                Ok(None)
+            }
             _ => Ok(None),
         }
     }
 
+    fn open_search_panel(&mut self) {
+        self.search_panel.open = true;
+        self.search_panel.focus = SearchFocus::Query;
+        self.search_panel.collection_cursor = 0;
+        self.search_panel.tag_cursor = 0;
+        self.search_panel.snapshot = Some(SearchSnapshot {
+            library_query: self.ctx.library_query.clone(),
+            favorites_only: self.ctx.favorites_only,
+            collection_filter: self.ctx.collection_filter.clone(),
+            tag_filters: self.ctx.tag_filters.clone(),
+            tag_match_mode: self.ctx.tag_match_mode,
+            selected_path: self
+                .ctx
+                .books
+                .get(self.ctx.selected)
+                .map(|b| b.path.clone()),
+        });
+        self.label_input_panel.open = false;
+        self.label_browse_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+        self.normalize_selection_to_visible();
+    }
+
+    fn close_search_panel(&mut self) {
+        self.search_panel.open = false;
+        self.search_panel.snapshot = None;
+    }
+
+    fn cancel_search_panel(&mut self) {
+        if let Some(snapshot) = self.search_panel.snapshot.take() {
+            self.ctx.library_query = snapshot.library_query;
+            self.ctx.favorites_only = snapshot.favorites_only;
+            self.ctx.collection_filter = snapshot.collection_filter;
+            self.ctx.tag_filters = snapshot.tag_filters;
+            self.ctx.tag_match_mode = snapshot.tag_match_mode;
+
+            if let Some(path) = snapshot.selected_path {
+                if let Some(idx) = self.ctx.books.iter().position(|b| b.path == path) {
+                    self.ctx.selected = idx;
+                }
+            }
+            self.normalize_selection_to_visible();
+        }
+        self.search_panel.open = false;
+    }
+
     fn handle_search_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.ctx.library_query.clear();
+            self.ctx.favorites_only = false;
+            self.ctx.collection_filter = CollectionFilter::Any;
+            self.ctx.tag_filters.clear();
+            self.ctx.tag_match_mode = TagMatchMode::Or;
+            self.normalize_selection_to_visible();
+            return Ok(None);
+        }
+
         match key.code {
             KeyCode::Esc => {
-                self.search_panel.open = false;
+                self.cancel_search_panel();
                 Ok(None)
             }
             KeyCode::Enter => {
-                if let Some(idx) = self.selected_visible_index() {
-                    let opened_at = unix_now_secs();
-                    if let Some(book) = self.ctx.books.get_mut(idx) {
-                        book.last_opened = Some(opened_at);
-                        self.ctx
-                            .opened_at_by_path
-                            .insert(book.path.clone(), opened_at);
-                        let book = book.clone();
-                        self.search_panel.open = false;
-                        self.reader.open_book(&book, &self.ctx, &self.engine);
+                self.close_search_panel();
+                Ok(None)
+            }
+            KeyCode::Tab => {
+                self.search_panel.focus = self.search_panel.focus.next();
+                Ok(None)
+            }
+            KeyCode::BackTab => {
+                self.search_panel.focus = self.search_panel.focus.prev();
+                Ok(None)
+            }
+            KeyCode::Left => {
+                if self.ctx.tag_match_mode == TagMatchMode::And {
+                    self.ctx.tag_match_mode = TagMatchMode::Or;
+                }
+                Ok(None)
+            }
+            KeyCode::Right => {
+                if self.ctx.tag_match_mode == TagMatchMode::Or {
+                    self.ctx.tag_match_mode = TagMatchMode::And;
+                }
+                Ok(None)
+            }
+            KeyCode::Up => {
+                match self.search_panel.focus {
+                    SearchFocus::Query => {}
+                    SearchFocus::Collections => {
+                        self.search_panel.collection_cursor =
+                            self.search_panel.collection_cursor.saturating_sub(1);
+                    }
+                    SearchFocus::Tags => {
+                        self.search_panel.tag_cursor =
+                            self.search_panel.tag_cursor.saturating_sub(1);
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Down => {
+                match self.search_panel.focus {
+                    SearchFocus::Query => {}
+                    SearchFocus::Collections => {
+                        self.search_panel.collection_cursor =
+                            self.search_panel.collection_cursor.saturating_add(1);
+                    }
+                    SearchFocus::Tags => {
+                        self.search_panel.tag_cursor =
+                            self.search_panel.tag_cursor.saturating_add(1);
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Char('f') => {
+                self.ctx.favorites_only = !self.ctx.favorites_only;
+                self.normalize_selection_to_visible();
+                Ok(None)
+            }
+            KeyCode::Char(' ') => {
+                match self.search_panel.focus {
+                    SearchFocus::Query => {
+                        self.ctx.library_query.push(' ');
+                        self.normalize_selection_to_visible();
+                    }
+                    SearchFocus::Collections => {
+                        self.apply_collection_cursor();
+                        self.normalize_selection_to_visible();
+                    }
+                    SearchFocus::Tags => {
+                        self.toggle_tag_cursor();
+                        self.normalize_selection_to_visible();
                     }
                 }
                 Ok(None)
             }
             KeyCode::Backspace => {
-                self.search_panel.query.pop();
-                self.normalize_selection_to_visible();
-                Ok(None)
-            }
-            KeyCode::Up => {
-                self.select_prev_visible();
-                Ok(None)
-            }
-            KeyCode::Down => {
-                self.select_next_visible();
-                Ok(None)
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search_panel.query.clear();
-                self.normalize_selection_to_visible();
+                if self.search_panel.focus == SearchFocus::Query {
+                    self.ctx.library_query.pop();
+                    self.normalize_selection_to_visible();
+                }
                 Ok(None)
             }
             KeyCode::Char(ch) => {
-                if !ch.is_control() {
-                    self.search_panel.query.push(ch);
+                if self.search_panel.focus == SearchFocus::Query && !ch.is_control() {
+                    self.ctx.library_query.push(ch);
                     self.normalize_selection_to_visible();
                 }
                 Ok(None)
             }
             _ => Ok(None),
         }
+    }
+
+    fn normalize_tag_filters(&mut self) {
+        self.ctx.tag_filters.retain(|t| !t.trim().is_empty());
+        self.ctx.tag_filters.sort_by(|a, b| {
+            a.to_ascii_lowercase()
+                .cmp(&b.to_ascii_lowercase())
+                .then_with(|| a.cmp(b))
+        });
+        self.ctx
+            .tag_filters
+            .dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    }
+
+    fn all_tag_names(&self) -> Vec<String> {
+        let mut tags: Vec<String> = self
+            .ctx
+            .labels_by_path
+            .values()
+            .flat_map(|labels| labels.tags.iter().cloned())
+            .collect();
+        tags.retain(|t| !t.trim().is_empty());
+        tags.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        tags
+    }
+
+    fn all_collection_names(&self) -> Vec<String> {
+        let mut cols: Vec<String> = self
+            .ctx
+            .labels_by_path
+            .values()
+            .filter_map(|labels| labels.collection.clone())
+            .collect();
+        cols.retain(|c| !c.trim().is_empty());
+        cols.sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        cols.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        cols
+    }
+
+    fn matches_query(&self, book: &Book) -> bool {
+        let query = self.ctx.library_query.trim();
+        if query.is_empty() {
+            return true;
+        }
+        let query = query.to_ascii_lowercase();
+
+        let title = book.title.to_ascii_lowercase();
+        if title.contains(&query) {
+            return true;
+        }
+
+        let path = bookshelf_core::display_path(&book.path).to_ascii_lowercase();
+        path.contains(&query)
+    }
+
+    fn matches_favorites_only(&self, book: &Book) -> bool {
+        !self.ctx.favorites_only || book.favorite
+    }
+
+    fn matches_collection(&self, book: &Book) -> bool {
+        let labels = self
+            .ctx
+            .labels_by_path
+            .get(&book.path)
+            .cloned()
+            .unwrap_or_default();
+        matches_collection_filter(&self.ctx.collection_filter, labels.collection.as_deref())
+    }
+
+    fn matches_tags(&self, book: &Book) -> bool {
+        let labels = self
+            .ctx
+            .labels_by_path
+            .get(&book.path)
+            .cloned()
+            .unwrap_or_default();
+        matches_tag_filter(&self.ctx.tag_filters, self.ctx.tag_match_mode, &labels.tags)
+    }
+
+    fn counts_by_collection_for_search(
+        &self,
+    ) -> (usize, usize, std::collections::HashMap<String, usize>) {
+        let mut total = 0usize;
+        let mut none_count = 0usize;
+        let mut by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for book in &self.ctx.books {
+            if !self.matches_query(book) || !self.matches_favorites_only(book) {
+                continue;
+            }
+            if !self.matches_tags(book) {
+                continue;
+            }
+            total += 1;
+
+            let labels = self
+                .ctx
+                .labels_by_path
+                .get(&book.path)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(col) = labels.collection.as_deref() {
+                *by_name.entry(col.to_string()).or_insert(0) += 1;
+            } else {
+                none_count += 1;
+            }
+        }
+
+        (total, none_count, by_name)
+    }
+
+    fn counts_by_tag_for_search(&self) -> (usize, std::collections::HashMap<String, usize>) {
+        let mut total = 0usize;
+        let mut by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for book in &self.ctx.books {
+            if !self.matches_query(book) || !self.matches_favorites_only(book) {
+                continue;
+            }
+            if !self.matches_collection(book) {
+                continue;
+            }
+            total += 1;
+
+            let labels = self
+                .ctx
+                .labels_by_path
+                .get(&book.path)
+                .cloned()
+                .unwrap_or_default();
+            for tag in labels.tags {
+                if tag.trim().is_empty() {
+                    continue;
+                }
+                *by_name.entry(tag).or_insert(0) += 1;
+            }
+        }
+
+        (total, by_name)
+    }
+
+    fn collection_entries_for_search(&self) -> Vec<CollectionEntry> {
+        let (total, none_count, counts) = self.counts_by_collection_for_search();
+        let mut out = Vec::new();
+        out.push(CollectionEntry {
+            label: "Any".to_string(),
+            filter: CollectionFilter::Any,
+            count: total,
+        });
+        out.push(CollectionEntry {
+            label: "None".to_string(),
+            filter: CollectionFilter::None,
+            count: none_count,
+        });
+
+        for name in self.all_collection_names() {
+            let count = counts
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+                .map(|(_, v)| *v)
+                .unwrap_or(0);
+            out.push(CollectionEntry {
+                label: name.clone(),
+                filter: CollectionFilter::Selected(name),
+                count,
+            });
+        }
+        out
+    }
+
+    fn tag_entries_for_search(&self) -> Vec<TagEntry> {
+        let (_total, counts) = self.counts_by_tag_for_search();
+        let mut out = Vec::new();
+        for name in self.all_tag_names() {
+            let count = counts
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+                .map(|(_, v)| *v)
+                .unwrap_or(0);
+            out.push(TagEntry { name, count });
+        }
+        out
+    }
+
+    fn apply_collection_cursor(&mut self) {
+        let entries = self.collection_entries_for_search();
+        if entries.is_empty() {
+            return;
+        }
+        self.search_panel.collection_cursor = self
+            .search_panel
+            .collection_cursor
+            .min(entries.len().saturating_sub(1));
+        let entry = &entries[self.search_panel.collection_cursor];
+        self.ctx.collection_filter = entry.filter.clone();
+        self.normalize_selection_to_visible();
+    }
+
+    fn toggle_tag_cursor(&mut self) {
+        let entries = self.tag_entries_for_search();
+        if entries.is_empty() {
+            return;
+        }
+        self.search_panel.tag_cursor = self
+            .search_panel
+            .tag_cursor
+            .min(entries.len().saturating_sub(1));
+        let tag = &entries[self.search_panel.tag_cursor].name;
+
+        if let Some(pos) = self
+            .ctx
+            .tag_filters
+            .iter()
+            .position(|t| t.eq_ignore_ascii_case(tag))
+        {
+            self.ctx.tag_filters.remove(pos);
+        } else {
+            self.ctx.tag_filters.push(tag.clone());
+        }
+        self.normalize_tag_filters();
+        self.normalize_selection_to_visible();
     }
 
     fn handle_reader_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
@@ -1154,12 +1504,146 @@ impl Ui {
         self.search_panel.open = false;
         self.settings_panel.open = false;
         self.scan_panel.open = false;
+        self.label_browse_panel.open = false;
     }
 
     fn selected_book_path(&self) -> Option<String> {
         self.selected_visible_index()
             .and_then(|idx| self.ctx.books.get(idx))
             .map(|b| b.path.clone())
+    }
+
+    fn open_label_browse_panel(&mut self) {
+        self.label_browse_panel.open = true;
+        self.label_browse_panel.step = LabelBrowseStep::Collections;
+        self.label_browse_panel.collection_cursor = 0;
+        self.label_browse_panel.tag_cursor = 0;
+
+        self.search_panel.open = false;
+        self.label_input_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+        self.normalize_selection_to_visible();
+    }
+
+    fn tag_entries_for_browse(&self) -> (usize, Vec<TagEntry>) {
+        let (total, counts) = self.counts_by_tag_for_search();
+        let mut out = Vec::new();
+        for name in self.all_tag_names() {
+            let count = counts
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(&name))
+                .map(|(_, v)| *v)
+                .unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            out.push(TagEntry { name, count });
+        }
+        (total, out)
+    }
+
+    fn handle_label_browse_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.ctx.collection_filter = CollectionFilter::Any;
+            self.ctx.tag_filters.clear();
+            self.normalize_selection_to_visible();
+            self.label_browse_panel.step = LabelBrowseStep::Collections;
+            self.label_browse_panel.collection_cursor = 0;
+            self.label_browse_panel.tag_cursor = 0;
+            return Ok(None);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                match self.label_browse_panel.step {
+                    LabelBrowseStep::Collections => {
+                        self.label_browse_panel.open = false;
+                    }
+                    LabelBrowseStep::Tags => {
+                        self.label_browse_panel.step = LabelBrowseStep::Collections;
+                        self.label_browse_panel.tag_cursor = 0;
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Up => {
+                match self.label_browse_panel.step {
+                    LabelBrowseStep::Collections => {
+                        self.label_browse_panel.collection_cursor =
+                            self.label_browse_panel.collection_cursor.saturating_sub(1);
+                    }
+                    LabelBrowseStep::Tags => {
+                        self.label_browse_panel.tag_cursor =
+                            self.label_browse_panel.tag_cursor.saturating_sub(1);
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Down => {
+                match self.label_browse_panel.step {
+                    LabelBrowseStep::Collections => {
+                        self.label_browse_panel.collection_cursor =
+                            self.label_browse_panel.collection_cursor.saturating_add(1);
+                    }
+                    LabelBrowseStep::Tags => {
+                        self.label_browse_panel.tag_cursor =
+                            self.label_browse_panel.tag_cursor.saturating_add(1);
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                match self.label_browse_panel.step {
+                    LabelBrowseStep::Collections => {
+                        let entries = self.collection_entries_for_search();
+                        if entries.is_empty() {
+                            return Ok(None);
+                        }
+                        self.label_browse_panel.collection_cursor = self
+                            .label_browse_panel
+                            .collection_cursor
+                            .min(entries.len().saturating_sub(1));
+                        let entry = &entries[self.label_browse_panel.collection_cursor];
+
+                        self.ctx.collection_filter = entry.filter.clone();
+                        self.ctx.tag_filters.clear();
+                        self.normalize_selection_to_visible();
+
+                        self.label_browse_panel.step = LabelBrowseStep::Tags;
+                        self.label_browse_panel.tag_cursor = 0;
+                    }
+                    LabelBrowseStep::Tags => {
+                        let (_total, tags) = self.tag_entries_for_browse();
+                        let tag_count = tags.len();
+                        let max = tag_count + 1;
+                        if max == 0 {
+                            return Ok(None);
+                        }
+
+                        self.label_browse_panel.tag_cursor = self
+                            .label_browse_panel
+                            .tag_cursor
+                            .min(max.saturating_sub(1));
+                        if self.label_browse_panel.tag_cursor == 0 {
+                            self.ctx.tag_filters.clear();
+                        } else {
+                            let idx = self.label_browse_panel.tag_cursor - 1;
+                            if let Some(tag) = tags.get(idx) {
+                                self.ctx.tag_filters = vec![tag.name.clone()];
+                                self.normalize_tag_filters();
+                            }
+                        }
+                        self.normalize_selection_to_visible();
+                        self.label_browse_panel.open = false;
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
     }
 
     fn handle_label_input_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
@@ -1259,14 +1743,32 @@ impl Ui {
     }
 
     fn visible_indices(&self) -> Vec<usize> {
-        let query = self.search_panel.query.trim();
-        if query.is_empty() {
-            return (0..self.ctx.books.len()).collect();
-        }
-
-        let query = query.to_ascii_lowercase();
+        let query = self.ctx.library_query.trim().to_ascii_lowercase();
         let mut out = Vec::new();
         for (idx, book) in self.ctx.books.iter().enumerate() {
+            if self.ctx.favorites_only && !book.favorite {
+                continue;
+            }
+
+            let labels = self
+                .ctx
+                .labels_by_path
+                .get(&book.path)
+                .cloned()
+                .unwrap_or_default();
+            if !matches_collection_filter(&self.ctx.collection_filter, labels.collection.as_deref())
+            {
+                continue;
+            }
+            if !matches_tag_filter(&self.ctx.tag_filters, self.ctx.tag_match_mode, &labels.tags) {
+                continue;
+            }
+
+            if query.is_empty() {
+                out.push(idx);
+                continue;
+            }
+
             let title = book.title.to_ascii_lowercase();
             if title.contains(&query) {
                 out.push(idx);
@@ -1350,7 +1852,7 @@ impl Ui {
     }
 
     fn main_footer_spans(&self) -> Vec<Span<'static>> {
-        let query = self.search_panel.query.trim();
+        let query = self.ctx.library_query.trim();
 
         let mut spans = if self.label_input_panel.open {
             vec![
@@ -1363,14 +1865,29 @@ impl Ui {
                 Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" clear"),
             ]
+        } else if self.label_browse_panel.open {
+            vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" back/close  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" select  "),
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move  "),
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear"),
+            ]
         } else if self.search_panel.open {
             vec![
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" close  "),
+                Span::raw(" cancel  "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" open  "),
+                Span::raw(" close  "),
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" move  "),
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" focus  "),
+                Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" toggle  "),
                 Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" clear"),
             ]
@@ -1382,6 +1899,10 @@ impl Ui {
                 Span::raw(" move  "),
                 Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" search  "),
+                Span::styled("l", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" labels  "),
+                Span::styled("←/→", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" fav filter  "),
                 Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" favorite  "),
                 Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
@@ -1403,7 +1924,45 @@ impl Ui {
             ));
         }
 
+        if self.ctx.favorites_only && !self.search_panel.open && !self.label_browse_panel.open {
+            spans.push(Span::raw("  |  "));
+            spans.push(Span::styled(
+                "favorites only".to_string(),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+
+        if let Some(label) = self.active_label_filter_summary() {
+            if !self.search_panel.open && !self.label_browse_panel.open {
+                spans.push(Span::raw("  |  "));
+                spans.push(Span::styled(label, Style::default().fg(Color::Cyan)));
+            }
+        }
+
         spans
+    }
+
+    fn active_label_filter_summary(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        match &self.ctx.collection_filter {
+            CollectionFilter::Any => {}
+            CollectionFilter::None => parts.push("collection:none".to_string()),
+            CollectionFilter::Selected(name) => parts.push(format!("collection:{name}")),
+        }
+
+        if !self.ctx.tag_filters.is_empty() {
+            let mode = match self.ctx.tag_match_mode {
+                TagMatchMode::And => "and",
+                TagMatchMode::Or => "or",
+            };
+            parts.push(format!("tags({mode}): {}", self.ctx.tag_filters.join(", ")));
+        }
+
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" "))
+        }
     }
 
     fn refresh_meta_cache(&mut self) {
@@ -1508,19 +2067,18 @@ impl Ui {
         if self.label_input_panel.open {
             self.draw_label_input_panel(area, frame);
         }
+
+        if self.label_browse_panel.open {
+            self.draw_label_browse_panel(area, frame);
+        }
     }
 
     fn draw_search_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(70, 28, area);
+        let popup_area = centered_rect(90, 78, area);
         frame.render_widget(Clear, popup_area);
 
-        let query = self.search_panel.query.trim();
         let visible = self.visible_indices();
-        let title = if query.is_empty() {
-            "Search".to_string()
-        } else {
-            format!("Search — {}/{}", visible.len(), self.ctx.books.len())
-        };
+        let title = format!("Search — {}/{}", visible.len(), self.ctx.books.len());
 
         let block = Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -1529,20 +2087,218 @@ impl Ui {
         frame.render_widget(block.clone(), popup_area);
 
         let inner = block.inner(popup_area);
-        let lines = vec![
-            Line::from(vec![
-                Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(self.search_panel.query.clone()),
-            ]),
-            Line::raw(""),
-            Line::raw("Type to filter by title or path."),
-            Line::raw("Esc closes, Enter opens, Ctrl+u clears."),
-        ];
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(7),
+                Constraint::Min(0),
+                Constraint::Length(4),
+            ])
+            .split(inner);
 
-        let paragraph = Paragraph::new(Text::from(lines))
+        let query_style = if self.search_panel.focus == SearchFocus::Query {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let filters_lines = self.search_panel_summary_lines(query_style);
+        let header = Paragraph::new(Text::from(filters_lines))
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
-        frame.render_widget(paragraph, inner);
+        frame.render_widget(header, sections[0]);
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(sections[1]);
+
+        self.draw_search_collections_list(body[0], frame);
+        self.draw_search_tags_list(body[1], frame);
+
+        let help_lines = vec![
+            Line::from(vec![
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" focus  "),
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move  "),
+                Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" toggle  "),
+                Span::styled("←/→", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" tags AND/OR"),
+            ]),
+            Line::from(vec![
+                Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" favorites-only  "),
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear all  "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" close"),
+            ]),
+        ];
+        let help = Paragraph::new(Text::from(help_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(help, sections[2]);
+    }
+
+    fn search_panel_summary_lines(&self, query_style: Style) -> Vec<Line<'static>> {
+        let query = self.ctx.library_query.clone();
+        let fav = if self.ctx.favorites_only { "on" } else { "off" };
+        let collection = match &self.ctx.collection_filter {
+            CollectionFilter::Any => "any".to_string(),
+            CollectionFilter::None => "none".to_string(),
+            CollectionFilter::Selected(name) => name.clone(),
+        };
+        let mode = match self.ctx.tag_match_mode {
+            TagMatchMode::And => "AND",
+            TagMatchMode::Or => "OR",
+        };
+        let tags = if self.ctx.tag_filters.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.ctx.tag_filters.join(", ")
+        };
+
+        vec![
+            Line::from(vec![
+                Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(query, query_style),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    "Favorites only: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(fav),
+                Span::raw("  "),
+                Span::styled(
+                    "Collection: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(collection),
+            ]),
+            Line::from(vec![
+                Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(tags),
+            ]),
+            Line::from(vec![
+                Span::styled("Tag match: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(mode),
+            ]),
+        ]
+    }
+
+    fn draw_search_collections_list(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let entries = self.collection_entries_for_search();
+        let mut cursor = self.search_panel.collection_cursor;
+        if !entries.is_empty() {
+            cursor = cursor.min(entries.len().saturating_sub(1));
+        } else {
+            cursor = 0;
+        }
+
+        let focus = self.search_panel.focus == SearchFocus::Collections;
+        let title = if focus {
+            "Collections *"
+        } else {
+            "Collections"
+        };
+
+        let items: Vec<ListItem> = if entries.is_empty() {
+            vec![ListItem::new(Line::raw("(none)"))]
+        } else {
+            entries
+                .iter()
+                .map(|e| {
+                    let selected = e.filter == self.ctx.collection_filter;
+                    let prefix = if selected { "●" } else { " " };
+                    ListItem::new(Line::raw(format!("{prefix} {} ({})", e.label, e.count)))
+                })
+                .collect()
+        };
+
+        let highlight_style = if focus {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut state = ListState::default();
+        if !entries.is_empty() {
+            state.select(Some(cursor));
+        }
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn draw_search_tags_list(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let entries = self.tag_entries_for_search();
+        let mut cursor = self.search_panel.tag_cursor;
+        if !entries.is_empty() {
+            cursor = cursor.min(entries.len().saturating_sub(1));
+        } else {
+            cursor = 0;
+        }
+
+        let focus = self.search_panel.focus == SearchFocus::Tags;
+        let mode = match self.ctx.tag_match_mode {
+            TagMatchMode::And => "AND",
+            TagMatchMode::Or => "OR",
+        };
+        let title = if focus {
+            format!("Tags ({mode}) *")
+        } else {
+            format!("Tags ({mode})")
+        };
+
+        let items: Vec<ListItem> = if entries.is_empty() {
+            vec![ListItem::new(Line::raw("(none)"))]
+        } else {
+            entries
+                .iter()
+                .map(|e| {
+                    let selected = self
+                        .ctx
+                        .tag_filters
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&e.name));
+                    let prefix = if selected { "[x]" } else { "[ ]" };
+                    ListItem::new(Line::raw(format!("{prefix} {} ({})", e.name, e.count)))
+                })
+                .collect()
+        };
+
+        let highlight_style = if focus {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut state = ListState::default();
+        if !entries.is_empty() {
+            state.select(Some(cursor));
+        }
+        frame.render_stateful_widget(list, area, &mut state);
     }
 
     fn draw_label_input_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -1642,6 +2398,177 @@ impl Ui {
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
         frame.render_widget(paragraph, inner);
+    }
+
+    fn draw_label_browse_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(80, 70, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = match self.label_browse_panel.step {
+            LabelBrowseStep::Collections => "Browse labels — collections",
+            LabelBrowseStep::Tags => "Browse labels — tags",
+        };
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(6),
+                Constraint::Min(0),
+                Constraint::Length(4),
+            ])
+            .split(inner);
+
+        let mut header_lines = Vec::new();
+        header_lines.push(Line::from(vec![
+            Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(if self.ctx.library_query.trim().is_empty() {
+                "-".to_string()
+            } else {
+                self.ctx.library_query.trim().to_string()
+            }),
+            Span::raw("  "),
+            Span::styled("Fav-only: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(if self.ctx.favorites_only { "on" } else { "off" }),
+        ]));
+
+        let collection = match &self.ctx.collection_filter {
+            CollectionFilter::Any => "any".to_string(),
+            CollectionFilter::None => "none".to_string(),
+            CollectionFilter::Selected(name) => name.clone(),
+        };
+        let tags = if self.ctx.tag_filters.is_empty() {
+            "(none)".to_string()
+        } else {
+            self.ctx.tag_filters.join(", ")
+        };
+        header_lines.push(Line::from(vec![
+            Span::styled(
+                "Collection: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(collection),
+        ]));
+        header_lines.push(Line::from(vec![
+            Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(tags),
+        ]));
+        header_lines.push(Line::raw(""));
+        header_lines.push(Line::raw(
+            "Enter selects. Esc goes back/closes. Ctrl+u clears label filters.",
+        ));
+
+        let header = Paragraph::new(Text::from(header_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(header, sections[0]);
+
+        let highlight_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        match self.label_browse_panel.step {
+            LabelBrowseStep::Collections => {
+                let entries = self.collection_entries_for_search();
+                let mut cursor = self.label_browse_panel.collection_cursor;
+                if !entries.is_empty() {
+                    cursor = cursor.min(entries.len().saturating_sub(1));
+                } else {
+                    cursor = 0;
+                }
+
+                let items: Vec<ListItem> = if entries.is_empty() {
+                    vec![ListItem::new(Line::raw("(none)"))]
+                } else {
+                    entries
+                        .iter()
+                        .map(|e| {
+                            let selected = e.filter == self.ctx.collection_filter;
+                            let prefix = if selected { "●" } else { " " };
+                            ListItem::new(Line::raw(format!("{prefix} {} ({})", e.label, e.count)))
+                        })
+                        .collect()
+                };
+
+                let list = List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title("Collections"))
+                    .highlight_style(highlight_style)
+                    .highlight_symbol("> ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                let mut state = ListState::default();
+                if !entries.is_empty() {
+                    state.select(Some(cursor));
+                }
+                frame.render_stateful_widget(list, sections[1], &mut state);
+            }
+            LabelBrowseStep::Tags => {
+                let (total, tags) = self.tag_entries_for_browse();
+                let mut cursor = self.label_browse_panel.tag_cursor;
+                let max = tags.len() + 1;
+                if max > 0 {
+                    cursor = cursor.min(max.saturating_sub(1));
+                } else {
+                    cursor = 0;
+                }
+
+                let mut items = Vec::new();
+                let selected_none = self.ctx.tag_filters.is_empty();
+                let prefix = if selected_none { "●" } else { " " };
+                items.push(ListItem::new(Line::raw(format!(
+                    "{prefix} (all tags) ({total})"
+                ))));
+                for tag in &tags {
+                    let selected = self
+                        .ctx
+                        .tag_filters
+                        .iter()
+                        .any(|t| t.eq_ignore_ascii_case(&tag.name));
+                    let prefix = if selected { "●" } else { " " };
+                    items.push(ListItem::new(Line::raw(format!(
+                        "{prefix} {} ({})",
+                        tag.name, tag.count
+                    ))));
+                }
+
+                let list = List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title("Tags in collection"),
+                    )
+                    .highlight_style(highlight_style)
+                    .highlight_symbol("> ")
+                    .highlight_spacing(HighlightSpacing::Always);
+                let mut state = ListState::default();
+                state.select(Some(cursor));
+                frame.render_stateful_widget(list, sections[1], &mut state);
+            }
+        }
+
+        let footer_lines = vec![
+            Line::from(vec![
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" select  "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" back/close"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear labels"),
+            ]),
+        ];
+        let footer = Paragraph::new(Text::from(footer_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(footer, sections[2]);
     }
 
     fn draw_bookmarks_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -2271,15 +3198,18 @@ impl Ui {
 
     fn draw_library(&self, frame: &mut ratatui::Frame, area: Rect) {
         let visible = self.visible_indices();
-        let query = self.search_panel.query.trim();
-        let title = if query.is_empty() {
-            "Library".to_string()
-        } else {
+        let has_filters = !self.ctx.library_query.trim().is_empty()
+            || self.ctx.favorites_only
+            || !matches!(self.ctx.collection_filter, CollectionFilter::Any)
+            || !self.ctx.tag_filters.is_empty();
+        let title = if has_filters {
             format!(
                 "Library — {}/{} matches",
                 visible.len(),
                 self.ctx.books.len()
             )
+        } else {
+            "Library".to_string()
         };
         let block = Block::default().borders(Borders::ALL).title(title);
 
@@ -2306,10 +3236,11 @@ impl Ui {
         if visible.is_empty() {
             let mut lines = Vec::new();
             lines.push(Line::raw("No matches."));
+            let query = self.ctx.library_query.trim();
             if !query.is_empty() {
                 lines.push(Line::raw(""));
                 lines.push(Line::raw(format!("Query: {query}")));
-                lines.push(Line::raw("Tip: press / to edit, Ctrl+u to clear."));
+                lines.push(Line::raw("Tip: press / to edit filters, Ctrl+u to clear."));
             }
             let paragraph = Paragraph::new(Text::from(lines))
                 .block(block)
@@ -2362,6 +3293,33 @@ impl Ui {
             Span::raw("  "),
             Span::styled("Roots: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(self.ctx.settings.library_roots.len().to_string()),
+        ]));
+        let fav_status = if self.ctx.favorites_only { "on" } else { "off" };
+        let collection = match &self.ctx.collection_filter {
+            CollectionFilter::Any => "any".to_string(),
+            CollectionFilter::None => "none".to_string(),
+            CollectionFilter::Selected(name) => name.clone(),
+        };
+        let tag_mode = match self.ctx.tag_match_mode {
+            TagMatchMode::And => "and",
+            TagMatchMode::Or => "or",
+        };
+        let tags = if self.ctx.tag_filters.is_empty() {
+            "-".to_string()
+        } else {
+            self.ctx.tag_filters.join(", ")
+        };
+        let query = if self.ctx.library_query.trim().is_empty() {
+            "-".to_string()
+        } else {
+            self.ctx.library_query.trim().to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Filters: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!("fav:{fav_status} (←/→)  ")),
+            Span::raw(format!("collection:{collection}  ")),
+            Span::raw(format!("tags({tag_mode}): {tags}  ")),
+            Span::raw(format!("query:{query}")),
         ]));
         lines.push(Line::raw(""));
 
@@ -2550,16 +3508,104 @@ const SETTINGS_MENU_SCAN_PATHS: usize = 0;
 const SETTINGS_MENU_KITTY_IMAGE_QUALITY: usize = 1;
 const SETTINGS_MENU_ITEM_COUNT: usize = 2;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct SearchPanel {
     open: bool,
-    query: String,
+    focus: SearchFocus,
+    collection_cursor: usize,
+    tag_cursor: usize,
+    snapshot: Option<SearchSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchFocus {
+    Query,
+    Collections,
+    Tags,
+}
+
+impl SearchFocus {
+    fn next(self) -> Self {
+        match self {
+            SearchFocus::Query => SearchFocus::Collections,
+            SearchFocus::Collections => SearchFocus::Tags,
+            SearchFocus::Tags => SearchFocus::Query,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            SearchFocus::Query => SearchFocus::Tags,
+            SearchFocus::Collections => SearchFocus::Query,
+            SearchFocus::Tags => SearchFocus::Collections,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SearchSnapshot {
+    library_query: String,
+    favorites_only: bool,
+    collection_filter: CollectionFilter,
+    tag_filters: Vec<String>,
+    tag_match_mode: TagMatchMode,
+    selected_path: Option<String>,
+}
+
+impl Default for SearchPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            focus: SearchFocus::Query,
+            collection_cursor: 0,
+            tag_cursor: 0,
+            snapshot: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LabelInputMode {
     Tag,
     Collection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelBrowseStep {
+    Collections,
+    Tags,
+}
+
+#[derive(Debug, Clone)]
+struct LabelBrowsePanel {
+    open: bool,
+    step: LabelBrowseStep,
+    collection_cursor: usize,
+    tag_cursor: usize,
+}
+
+impl Default for LabelBrowsePanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            step: LabelBrowseStep::Collections,
+            collection_cursor: 0,
+            tag_cursor: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CollectionEntry {
+    label: String,
+    filter: CollectionFilter,
+    count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TagEntry {
+    name: String,
+    count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -3319,6 +4365,36 @@ fn parse_roots_input(input: &str) -> Vec<String> {
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect()
+}
+
+fn matches_collection_filter(filter: &CollectionFilter, book_collection: Option<&str>) -> bool {
+    match filter {
+        CollectionFilter::Any => true,
+        CollectionFilter::None => book_collection.is_none(),
+        CollectionFilter::Selected(wanted) => book_collection
+            .as_ref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(wanted)),
+    }
+}
+
+fn matches_tag_filter(selected: &[String], mode: TagMatchMode, book_tags: &[String]) -> bool {
+    if selected.is_empty() {
+        return true;
+    }
+    if book_tags.is_empty() {
+        return false;
+    }
+
+    match mode {
+        TagMatchMode::And => selected.iter().all(|t| {
+            let t = t.trim();
+            !t.is_empty() && book_tags.iter().any(|bt| bt.eq_ignore_ascii_case(t))
+        }),
+        TagMatchMode::Or => selected.iter().any(|t| {
+            let t = t.trim();
+            !t.is_empty() && book_tags.iter().any(|bt| bt.eq_ignore_ascii_case(t))
+        }),
+    }
 }
 
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {

@@ -5,12 +5,42 @@ use std::collections::HashSet;
 
 use bookshelf_core::{Book, BookLabels, Bookmark, Note, Progress, Settings};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagMatchMode {
+    And,
+    Or,
+}
+
+impl Default for TagMatchMode {
+    fn default() -> Self {
+        Self::Or
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CollectionFilter {
+    Any,
+    None,
+    Selected(String),
+}
+
+impl Default for CollectionFilter {
+    fn default() -> Self {
+        Self::Any
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppContext {
     pub settings: Settings,
     pub cwd: String,
     pub books: Vec<Book>,
     pub selected: usize,
+    pub library_query: String,
+    pub favorites_only: bool,
+    pub collection_filter: CollectionFilter,
+    pub tag_filters: Vec<String>,
+    pub tag_match_mode: TagMatchMode,
     pub progress_by_path: HashMap<String, u32>,
     pub opened_at_by_path: HashMap<String, i64>,
     pub labels_by_path: HashMap<String, BookLabels>,
@@ -29,6 +59,11 @@ impl AppContext {
             cwd: String::new(),
             books: Vec::new(),
             selected: 0,
+            library_query: String::new(),
+            favorites_only: false,
+            collection_filter: CollectionFilter::Any,
+            tag_filters: Vec::new(),
+            tag_match_mode: TagMatchMode::Or,
             progress_by_path: HashMap::new(),
             opened_at_by_path: HashMap::new(),
             labels_by_path: HashMap::new(),
