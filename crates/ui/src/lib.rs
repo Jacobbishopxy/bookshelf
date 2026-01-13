@@ -25,7 +25,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, cap_parser::QueryStdioOptions};
 use ratatui_image::protocol::Protocol as ImageProtocol;
 use ratatui_image::protocol::kitty::Kitty;
 use ratatui_image::{Image as ImageWidget, Resize};
@@ -101,8 +101,12 @@ impl Ui {
     pub fn run(&mut self) -> anyhow::Result<UiOutcome> {
         let mut terminal = setup_terminal()?;
         image_protocol::ensure_tmux_allow_passthrough();
-        self.image_picker = if image_protocol::in_kitty_env() {
-            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        self.image_picker = if image_protocol::should_query_stdio() {
+            let options = QueryStdioOptions {
+                timeout: image_protocol::stdio_query_timeout(),
+                text_sizing_protocol: false,
+            };
+            Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks())
         } else {
             Picker::halfblocks()
         };
@@ -2620,11 +2624,12 @@ impl ReaderPanel {
                     self.image_pan_x_px = pan_x_px;
                     self.image_pan_y_px = pan_y_px;
 
+                    let kitty_ok = image_protocol::kitty_supported(picker);
                     let max_transmit_px = ctx.settings.kitty_image_quality.max_transmit_pixels();
                     let (transmit_image, transmit_px) = {
                         let px = u64::from(view_image.width())
                             .saturating_mul(u64::from(view_image.height()));
-                        if image_protocol::in_kitty_env() && px > max_transmit_px {
+                        if kitty_ok && px > max_transmit_px {
                             let scale = (max_transmit_px as f64 / px.max(1) as f64)
                                 .sqrt()
                                 .clamp(0.01, 1.0);
@@ -2647,7 +2652,7 @@ impl ReaderPanel {
                         }
                     };
 
-                    let proto = if image_protocol::in_kitty_env() {
+                    let proto = if kitty_ok {
                         let cols = u16::try_from(
                             (transmit_px
                                 .0

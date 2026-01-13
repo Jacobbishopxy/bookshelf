@@ -1,5 +1,11 @@
 use ratatui_image::picker::{Capability, Picker, ProtocolType};
 
+fn term_is_xterm_kitty() -> bool {
+    std::env::var("TERM")
+        .ok()
+        .is_some_and(|term| term.trim().starts_with("xterm-kitty"))
+}
+
 pub(crate) fn ensure_tmux_allow_passthrough() {
     if std::env::var_os("TMUX").is_none() {
         return;
@@ -21,9 +27,36 @@ pub(crate) fn in_kitty_env() -> bool {
         .is_some_and(|s| !s.trim().is_empty())
 }
 
+pub(crate) fn should_query_stdio() -> bool {
+    if in_kitty_env() {
+        return true;
+    }
+
+    if term_is_xterm_kitty() {
+        // `KITTY_WINDOW_ID` is not forwarded over SSH by default, but `TERM` is.
+        return true;
+    }
+
+    // In tmux, we need to query to detect the outer terminal protocol.
+    std::env::var_os("TMUX").is_some()
+}
+
+pub(crate) fn stdio_query_timeout() -> std::time::Duration {
+    // Strong hints we are talking to kitty (including over SSH).
+    if in_kitty_env() || term_is_xterm_kitty() {
+        return std::time::Duration::from_millis(1500);
+    }
+
+    // If we're in tmux, query quickly; if passthrough isn't enabled/supported, don't stall startup.
+    if std::env::var_os("TMUX").is_some() {
+        return std::time::Duration::from_millis(300);
+    }
+
+    std::time::Duration::from_millis(0)
+}
+
 pub(crate) fn kitty_supported(picker: &Picker) -> bool {
-    // `TERM` can be incorrect (e.g. inherited), but `KITTY_WINDOW_ID` is reliable.
-    // Since we only support image mode in kitty, treat being inside kitty as sufficient.
+    // `KITTY_WINDOW_ID` is reliable when present; otherwise rely on queried capabilities.
     if in_kitty_env() {
         return true;
     }
@@ -45,6 +78,7 @@ pub(crate) fn prefer_kitty_if_supported(picker: &mut Picker) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -64,6 +98,31 @@ mod tests {
         match prev {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    fn with_env_vars(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
+        let _guard = env_lock().lock().unwrap();
+
+        let prev = vars
+            .iter()
+            .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
+            .collect::<Vec<(String, Option<OsString>)>>();
+
+        for (key, value) in vars {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+
+        f();
+
+        for (key, value) in prev {
+            match value {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
         }
     }
 
@@ -93,5 +152,41 @@ mod tests {
             assert!(kitty_supported(&picker));
             assert!(in_kitty_env());
         });
+    }
+
+    #[test]
+    fn should_query_stdio_true_when_term_is_xterm_kitty() {
+        with_env_vars(
+            &[
+                ("KITTY_WINDOW_ID", None),
+                ("TERM", Some("xterm-kitty")),
+                ("TMUX", None),
+            ],
+            || assert!(should_query_stdio()),
+        );
+    }
+
+    #[test]
+    fn should_query_stdio_false_without_hints() {
+        with_env_vars(
+            &[
+                ("KITTY_WINDOW_ID", None),
+                ("TERM", Some("xterm-256color")),
+                ("TMUX", None),
+            ],
+            || assert!(!should_query_stdio()),
+        );
+    }
+
+    #[test]
+    fn should_query_stdio_true_in_tmux() {
+        with_env_vars(
+            &[
+                ("KITTY_WINDOW_ID", None),
+                ("TERM", Some("xterm-256color")),
+                ("TMUX", Some("1")),
+            ],
+            || assert!(should_query_stdio()),
+        );
     }
 }
