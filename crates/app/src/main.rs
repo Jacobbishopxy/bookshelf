@@ -33,12 +33,14 @@ fn run() -> anyhow::Result<()> {
     sync_library(&storage, &settings, &cwd)?;
     let books = storage.list_books()?;
     let progress_by_path = storage.list_progress()?;
+    let labels_by_path = storage.list_labels_by_path()?;
     let bookmarks_by_path = storage.list_bookmarks_by_path()?;
     let notes_by_path = storage.list_notes_by_path()?;
 
     let mut ctx = AppContext::new(settings)
         .with_library(cwd_str, books)
         .with_progress(progress_by_path)
+        .with_labels(labels_by_path)
         .with_bookmarks(bookmarks_by_path)
         .with_notes(notes_by_path);
     loop {
@@ -46,6 +48,14 @@ fn run() -> anyhow::Result<()> {
         let outcome = ui.run()?;
         ctx = outcome.ctx;
         storage.save_settings(&ctx.settings)?;
+
+        let dirty_favorite_paths = std::mem::take(&mut ctx.dirty_favorite_paths);
+        for path in dirty_favorite_paths {
+            if let Some(book) = ctx.books.iter().find(|b| b.path == path) {
+                storage.set_favorite(&book.path, book.favorite)?;
+            }
+        }
+
         for (path, last_page) in ctx.progress_by_path.iter() {
             storage.set_progress(path, *last_page)?;
         }
@@ -53,6 +63,13 @@ fn run() -> anyhow::Result<()> {
             storage.set_last_opened(path, *opened_at)?;
         }
         ctx.opened_at_by_path.clear();
+
+        let dirty_label_paths = std::mem::take(&mut ctx.dirty_label_paths);
+        for path in dirty_label_paths {
+            let labels = ctx.labels_by_path.get(&path).cloned().unwrap_or_default();
+            storage.save_labels(&path, &labels)?;
+        }
+
         let dirty_bookmark_paths = std::mem::take(&mut ctx.dirty_bookmark_paths);
         for path in dirty_bookmark_paths {
             let bookmarks = ctx
@@ -74,12 +91,14 @@ fn run() -> anyhow::Result<()> {
                 sync_library(&storage, &ctx.settings, &cwd)?;
                 let books = storage.list_books()?;
                 let progress_by_path = storage.list_progress()?;
+                let labels_by_path = storage.list_labels_by_path()?;
                 let bookmarks_by_path = storage.list_bookmarks_by_path()?;
                 let notes_by_path = storage.list_notes_by_path()?;
                 let cwd_str = ctx.cwd.clone();
                 ctx = ctx
                     .with_library(cwd_str, books)
                     .with_progress(progress_by_path)
+                    .with_labels(labels_by_path)
                     .with_bookmarks(bookmarks_by_path)
                     .with_notes(notes_by_path);
             }
@@ -187,6 +206,7 @@ fn add_book(out: &mut std::collections::BTreeMap<String, Book>, path: &Path) -> 
             path: path_str,
             title,
             last_opened: None,
+            favorite: false,
         },
     );
     Ok(())

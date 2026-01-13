@@ -4,7 +4,8 @@ use std::path::Path;
 
 use anyhow::Context as _;
 use bookshelf_core::{
-    Book, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, ScanScope, Settings,
+    Book, BookLabels, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, ScanScope,
+    Settings, TagKind,
 };
 use rusqlite::{Connection, OptionalExtension as _};
 
@@ -53,7 +54,8 @@ impl Storage {
                 path TEXT NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 added_at INTEGER NOT NULL DEFAULT (unixepoch()),
-                last_opened INTEGER
+                last_opened INTEGER,
+                favorite INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS book_progress (
@@ -74,6 +76,19 @@ impl Storage {
                 page INTEGER NOT NULL,
                 body TEXT NOT NULL,
                 PRIMARY KEY (path, page, body)
+            );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                UNIQUE (name, kind)
+            );
+
+            CREATE TABLE IF NOT EXISTS book_tags (
+                path TEXT NOT NULL REFERENCES books(path) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                PRIMARY KEY (path, tag_id)
             );
             "#,
         )?;
@@ -157,6 +172,19 @@ impl Storage {
                 let msg = err.to_string();
                 if !msg.contains("duplicate column name") {
                     return Err(err).context("add settings.library_roots_json column");
+                }
+            }
+        }
+
+        match self.conn.execute(
+            "ALTER TABLE books ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err).context("add books.favorite column");
                 }
             }
         }
@@ -267,14 +295,16 @@ impl Storage {
     }
 
     pub fn list_books(&self) -> anyhow::Result<Vec<Book>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, title, last_opened FROM books ORDER BY title COLLATE NOCASE")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT path, title, last_opened, favorite FROM books ORDER BY title COLLATE NOCASE",
+        )?;
         let rows = stmt.query_map([], |row| {
+            let favorite: i64 = row.get(3)?;
             Ok(Book {
                 path: row.get(0)?,
                 title: row.get(1)?,
                 last_opened: row.get(2)?,
+                favorite: favorite != 0,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -285,6 +315,84 @@ impl Storage {
             "UPDATE books SET last_opened = ? WHERE path = ?",
             (last_opened, path),
         )?;
+        Ok(())
+    }
+
+    pub fn set_favorite(&self, path: &str, favorite: bool) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE books SET favorite = ? WHERE path = ?",
+            (i64::from(favorite), path),
+        )?;
+        Ok(())
+    }
+
+    pub fn list_labels_by_path(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, BookLabels>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT bt.path, t.name, t.kind
+            FROM book_tags bt
+            JOIN tags t ON t.id = bt.tag_id
+            ORDER BY bt.path, t.kind, t.name COLLATE NOCASE
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let path: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            Ok((path, name, kind))
+        })?;
+
+        let mut out: std::collections::HashMap<String, BookLabels> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (path, name, kind) = row?;
+            let kind = kind.parse::<TagKind>().unwrap_or(TagKind::Tag);
+            let entry = out.entry(path).or_default();
+            match kind {
+                TagKind::Tag => entry.tags.push(name),
+                TagKind::Collection => {
+                    if entry.collection.is_none() {
+                        entry.collection = Some(name);
+                    }
+                }
+            }
+        }
+
+        for labels in out.values_mut() {
+            labels.normalize();
+        }
+
+        Ok(out)
+    }
+
+    pub fn save_labels(&self, path: &str, labels: &BookLabels) -> anyhow::Result<()> {
+        let mut labels = labels.clone();
+        labels.normalize();
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM book_tags WHERE path = ?", [path])?;
+
+        if let Some(collection) = labels.collection.as_deref() {
+            let id = get_or_create_tag_id(&tx, collection, TagKind::Collection)
+                .context("get/create collection tag")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO book_tags (path, tag_id) VALUES (?, ?)",
+                (path, id),
+            )?;
+        }
+
+        for tag in &labels.tags {
+            let id = get_or_create_tag_id(&tx, tag, TagKind::Tag).context("get/create tag")?;
+            tx.execute(
+                "INSERT OR IGNORE INTO book_tags (path, tag_id) VALUES (?, ?)",
+                (path, id),
+            )?;
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -400,6 +508,26 @@ impl Storage {
     }
 }
 
+fn get_or_create_tag_id(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+    kind: TagKind,
+) -> anyhow::Result<i64> {
+    let name = name.trim();
+    tx.execute(
+        "INSERT INTO tags (name, kind) VALUES (?, ?) ON CONFLICT(name, kind) DO NOTHING",
+        (name, kind.as_str()),
+    )?;
+    let id: i64 = tx
+        .query_row(
+            "SELECT id FROM tags WHERE name = ? AND kind = ?",
+            (name, kind.as_str()),
+            |row| row.get(0),
+        )
+        .context("select tag id")?;
+    Ok(id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -440,10 +568,62 @@ mod tests {
             path: "/a/b.pdf".to_string(),
             title: "b".to_string(),
             last_opened: None,
+            favorite: false,
         };
         storage.upsert_book(&book)?;
         let books = storage.list_books()?;
         assert_eq!(books, vec![book]);
+        Ok(())
+    }
+
+    #[test]
+    fn favorite_roundtrip() -> anyhow::Result<()> {
+        let storage = open_in_memory()?;
+        let mut book = Book {
+            path: "/a/b.pdf".to_string(),
+            title: "b".to_string(),
+            last_opened: None,
+            favorite: false,
+        };
+        storage.upsert_book(&book)?;
+        storage.set_favorite(&book.path, true)?;
+
+        book.favorite = true;
+        let books = storage.list_books()?;
+        assert_eq!(books, vec![book]);
+        Ok(())
+    }
+
+    #[test]
+    fn labels_roundtrip_and_cascade() -> anyhow::Result<()> {
+        let storage = open_in_memory()?;
+        let book = Book {
+            path: "/a/b.pdf".to_string(),
+            title: "b".to_string(),
+            last_opened: None,
+            favorite: false,
+        };
+        storage.upsert_book(&book)?;
+
+        storage.save_labels(
+            &book.path,
+            &BookLabels {
+                tags: vec!["rust".to_string(), "tui".to_string()],
+                collection: Some("work".to_string()),
+            },
+        )?;
+
+        let labels = storage.list_labels_by_path()?;
+        assert_eq!(
+            labels.get(&book.path).cloned(),
+            Some(BookLabels {
+                tags: vec!["rust".to_string(), "tui".to_string()],
+                collection: Some("work".to_string())
+            })
+        );
+
+        storage.delete_book_by_path(&book.path)?;
+        assert!(storage.list_labels_by_path()?.is_empty());
         Ok(())
     }
 
@@ -454,6 +634,7 @@ mod tests {
             path: "/a/b.pdf".to_string(),
             title: "b".to_string(),
             last_opened: None,
+            favorite: false,
         };
         storage.upsert_book(&book)?;
 
@@ -474,6 +655,7 @@ mod tests {
             path: "/a/b.pdf".to_string(),
             title: "b".to_string(),
             last_opened: None,
+            favorite: false,
         };
         storage.upsert_book(&book)?;
 

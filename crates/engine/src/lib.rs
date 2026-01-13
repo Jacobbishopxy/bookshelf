@@ -1272,6 +1272,7 @@ mod tests {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "untitled".to_string()),
                 last_opened: None,
+                favorite: false,
             };
 
             let pages = engine.page_count(&book)?;

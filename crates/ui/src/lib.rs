@@ -51,6 +51,7 @@ pub struct Ui {
     settings_panel: SettingsPanel,
     scan_panel: ScanPathPanel,
     search_panel: SearchPanel,
+    label_input_panel: LabelInputPanel,
     goto_panel: GotoPanel,
     bookmarks_panel: BookmarksPanel,
     notes_panel: NotesPanel,
@@ -70,6 +71,7 @@ impl Ui {
         let settings_panel = SettingsPanel::default();
         let scan_panel = ScanPathPanel::new(join_roots(&ctx.settings));
         let search_panel = SearchPanel::default();
+        let label_input_panel = LabelInputPanel::default();
         let goto_panel = GotoPanel::default();
         let bookmarks_panel = BookmarksPanel::default();
         let notes_panel = NotesPanel::default();
@@ -82,6 +84,7 @@ impl Ui {
             settings_panel,
             scan_panel,
             search_panel,
+            label_input_panel,
             goto_panel,
             bookmarks_panel,
             notes_panel,
@@ -191,6 +194,7 @@ impl Ui {
                     path: path.clone(),
                     title,
                     last_opened: None,
+                    favorite: false,
                 }
             });
 
@@ -296,6 +300,13 @@ impl Ui {
                                 exit,
                             });
                         }
+                    } else if self.label_input_panel.open {
+                        if let Some(exit) = self.handle_label_input_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
                     } else if let Some(exit) = self.handle_main_key(key)? {
                         return Ok(UiOutcome {
                             ctx: self.ctx.clone(),
@@ -320,6 +331,23 @@ impl Ui {
             KeyCode::Char('/') => {
                 self.search_panel.open = true;
                 self.normalize_selection_to_visible();
+                Ok(None)
+            }
+            KeyCode::Char('f') => {
+                if let Some(idx) = self.selected_visible_index()
+                    && let Some(book) = self.ctx.books.get_mut(idx)
+                {
+                    book.favorite = !book.favorite;
+                    self.ctx.dirty_favorite_paths.insert(book.path.clone());
+                }
+                Ok(None)
+            }
+            KeyCode::Char('t') => {
+                self.open_label_input_panel(LabelInputMode::Tag);
+                Ok(None)
+            }
+            KeyCode::Char('c') => {
+                self.open_label_input_panel(LabelInputMode::Collection);
                 Ok(None)
             }
             KeyCode::Char('s') => {
@@ -1109,6 +1137,127 @@ impl Ui {
         }
     }
 
+    fn open_label_input_panel(&mut self, mode: LabelInputMode) {
+        self.label_input_panel.open = true;
+        self.label_input_panel.mode = mode;
+        self.label_input_panel.error = None;
+        self.label_input_panel.input.clear();
+
+        if mode == LabelInputMode::Collection
+            && let Some(path) = self.selected_book_path()
+            && let Some(labels) = self.ctx.labels_by_path.get(&path)
+            && let Some(collection) = labels.collection.as_deref()
+        {
+            self.label_input_panel.input = collection.to_string();
+        }
+
+        self.search_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+    }
+
+    fn selected_book_path(&self) -> Option<String> {
+        self.selected_visible_index()
+            .and_then(|idx| self.ctx.books.get(idx))
+            .map(|b| b.path.clone())
+    }
+
+    fn handle_label_input_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.label_input_panel.input.clear();
+            return Ok(None);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.label_input_panel.open = false;
+                self.label_input_panel.error = None;
+                self.label_input_panel.input.clear();
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let Some(path) = self.selected_book_path() else {
+                    self.label_input_panel.error = Some("No selection".to_string());
+                    return Ok(None);
+                };
+
+                let input = self.label_input_panel.input.trim();
+                if input.is_empty() {
+                    self.label_input_panel.error = Some(match self.label_input_panel.mode {
+                        LabelInputMode::Tag => "Enter a tag name".to_string(),
+                        LabelInputMode::Collection => {
+                            "Enter a collection name (or '-' to clear)".to_string()
+                        }
+                    });
+                    return Ok(None);
+                }
+
+                let mut labels = self
+                    .ctx
+                    .labels_by_path
+                    .get(&path)
+                    .cloned()
+                    .unwrap_or_default();
+
+                match self.label_input_panel.mode {
+                    LabelInputMode::Tag => {
+                        let parts = input.split(',').map(str::trim).filter(|s| !s.is_empty());
+                        let mut changed = false;
+                        for tag in parts {
+                            if let Some(pos) =
+                                labels.tags.iter().position(|t| t.eq_ignore_ascii_case(tag))
+                            {
+                                labels.tags.remove(pos);
+                                changed = true;
+                            } else {
+                                labels.tags.push(tag.to_string());
+                                changed = true;
+                            }
+                        }
+                        if !changed {
+                            self.label_input_panel.error = Some("Enter a tag name".to_string());
+                            return Ok(None);
+                        }
+                    }
+                    LabelInputMode::Collection => {
+                        let lower = input.to_ascii_lowercase();
+                        if lower == "-" || lower == "none" || lower == "clear" {
+                            labels.collection = None;
+                        } else {
+                            labels.collection = Some(input.to_string());
+                        }
+                    }
+                }
+
+                labels.normalize();
+                if labels.tags.is_empty() && labels.collection.is_none() {
+                    self.ctx.labels_by_path.remove(&path);
+                } else {
+                    self.ctx.labels_by_path.insert(path.clone(), labels);
+                }
+                self.ctx.dirty_label_paths.insert(path);
+
+                self.label_input_panel.open = false;
+                self.label_input_panel.error = None;
+                self.label_input_panel.input.clear();
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                self.label_input_panel.input.pop();
+                Ok(None)
+            }
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    self.label_input_panel.input.push(ch);
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn visible_indices(&self) -> Vec<usize> {
         let query = self.search_panel.query.trim();
         if query.is_empty() {
@@ -1203,7 +1352,18 @@ impl Ui {
     fn main_footer_spans(&self) -> Vec<Span<'static>> {
         let query = self.search_panel.query.trim();
 
-        let mut spans = if self.search_panel.open {
+        let mut spans = if self.label_input_panel.open {
+            vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" apply  "),
+                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" delete  "),
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear"),
+            ]
+        } else if self.search_panel.open {
             vec![
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" close  "),
@@ -1222,6 +1382,12 @@ impl Ui {
                 Span::raw(" move  "),
                 Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" search  "),
+                Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" favorite  "),
+                Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" tags  "),
+                Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" collection  "),
                 Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" settings  "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
@@ -1338,6 +1504,10 @@ impl Ui {
         if self.search_panel.open {
             self.draw_search_panel(area, frame);
         }
+
+        if self.label_input_panel.open {
+            self.draw_label_input_panel(area, frame);
+        }
     }
 
     fn draw_search_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -1368,6 +1538,105 @@ impl Ui {
             Line::raw("Type to filter by title or path."),
             Line::raw("Esc closes, Enter opens, Ctrl+u clears."),
         ];
+
+        let paragraph = Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(paragraph, inner);
+    }
+
+    fn draw_label_input_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(70, 38, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = match self.label_input_panel.mode {
+            LabelInputMode::Tag => "Tags",
+            LabelInputMode::Collection => "Collection",
+        };
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let mut lines = Vec::new();
+
+        let selected = self
+            .selected_visible_index()
+            .and_then(|idx| self.ctx.books.get(idx));
+        if let Some(book) = selected {
+            let labels = self
+                .ctx
+                .labels_by_path
+                .get(&book.path)
+                .cloned()
+                .unwrap_or_default();
+            let tags = if labels.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                labels.tags.join(", ")
+            };
+            let collection = labels.collection.unwrap_or_else(|| "-".to_string());
+            lines.push(Line::from(vec![
+                Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(book.title.clone()),
+            ]));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Collection: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(collection),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(tags),
+            ]));
+            lines.push(Line::raw(""));
+        } else {
+            lines.push(Line::styled(
+                "No selection.",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::raw(""));
+        }
+
+        let label = match self.label_input_panel.mode {
+            LabelInputMode::Tag => "Tag name",
+            LabelInputMode::Collection => "Collection name",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{label}: "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(self.label_input_panel.input.clone()),
+        ]));
+        lines.push(Line::raw(""));
+
+        match self.label_input_panel.mode {
+            LabelInputMode::Tag => {
+                lines.push(Line::raw("Enter toggles the tag on the selected book."));
+                lines.push(Line::raw("Comma-separated names toggle multiple tags."));
+            }
+            LabelInputMode::Collection => {
+                lines.push(Line::raw(
+                    "Enter sets the collection for the selected book.",
+                ));
+                lines.push(Line::raw("Type '-' (or 'none') to clear the collection."));
+            }
+        }
+        lines.push(Line::raw("Esc cancels, Backspace deletes, Ctrl+u clears."));
+
+        if let Some(err) = &self.label_input_panel.error {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                err.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
 
         let paragraph = Paragraph::new(Text::from(lines))
             .wrap(Wrap { trim: true })
@@ -1761,8 +2030,8 @@ impl Ui {
                     .map(|line| Line::raw(line.to_string()))
                     .collect::<Vec<_>>(),
             );
-            let body =
-                Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(page_title));
+            let body = Paragraph::new(text)
+                .block(Block::default().borders(Borders::ALL).title(page_title));
             frame.render_widget(body, layout[1]);
         }
 
@@ -2054,7 +2323,12 @@ impl Ui {
             .iter()
             .filter_map(|idx| self.ctx.books.get(*idx))
             .map(|book| {
-                let wrapped = wrap_text(&book.title, max_title_width.max(8));
+                let label = if book.favorite {
+                    format!("★ {}", book.title)
+                } else {
+                    format!("  {}", book.title)
+                };
+                let wrapped = wrap_text(&label, max_title_width.max(8));
                 let lines = wrapped.into_iter().map(Line::raw).collect::<Vec<_>>();
                 ListItem::new(Text::from(lines))
             })
@@ -2118,6 +2392,33 @@ impl Ui {
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(format_last_opened(book.last_opened)),
+            ]));
+            let labels = self
+                .ctx
+                .labels_by_path
+                .get(&book.path)
+                .cloned()
+                .unwrap_or_default();
+            let tags = if labels.tags.is_empty() {
+                "(none)".to_string()
+            } else {
+                labels.tags.join(", ")
+            };
+            let collection = labels.collection.unwrap_or_else(|| "-".to_string());
+            lines.push(Line::from(vec![
+                Span::styled("Favorite: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(if book.favorite { "yes" } else { "no" }),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Collection: ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(collection),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(tags),
             ]));
             lines.push(Line::raw(""));
         } else {
@@ -2253,6 +2554,31 @@ const SETTINGS_MENU_ITEM_COUNT: usize = 2;
 struct SearchPanel {
     open: bool,
     query: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelInputMode {
+    Tag,
+    Collection,
+}
+
+#[derive(Debug, Clone)]
+struct LabelInputPanel {
+    open: bool,
+    mode: LabelInputMode,
+    input: String,
+    error: Option<String>,
+}
+
+impl Default for LabelInputPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            mode: LabelInputMode::Tag,
+            input: String::new(),
+            error: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2410,6 +2736,7 @@ impl ReaderPanel {
             path: self.book_path.clone()?,
             title: self.book_title.clone()?,
             last_opened: None,
+            favorite: false,
         })
     }
 
@@ -2738,47 +3065,43 @@ impl ReaderPanel {
                 };
 
                 match engine.render_page_for_reader(
-                    &book,
-                    self.page,
-                    mode,
-                    text_mode,
-                    furniture,
-                    width,
-                    height,
+                    &book, self.page, mode, text_mode, furniture, width, height,
                 ) {
-                Ok(text) => {
-                    let text = if is_non_text_page(&text) {
-                        let kitty_ok = image_protocol::kitty_supported(picker);
-                        let hint = if kitty_ok {
-                            "image/chart (m: image mode)"
+                    Ok(text) => {
+                        let text = if is_non_text_page(&text) {
+                            let kitty_ok = image_protocol::kitty_supported(picker);
+                            let hint = if kitty_ok {
+                                "image/chart (m: image mode)"
+                            } else {
+                                "image/chart (k: kitty-reader)"
+                            };
+                            non_text_placeholder(width, height, hint)
                         } else {
-                            "image/chart (k: kitty-reader)"
+                            match text_mode {
+                                ReaderTextMode::Raw => text,
+                                ReaderTextMode::Wrap => {
+                                    wrap_preserving_lines(&text, width as usize)
+                                }
+                                ReaderTextMode::Reflow => wrap_reflow_text(&text, width as usize),
+                            }
                         };
-                        non_text_placeholder(width, height, hint)
-                    } else {
-                        match text_mode {
-                            ReaderTextMode::Raw => text,
-                            ReaderTextMode::Wrap => wrap_preserving_lines(&text, width as usize),
-                            ReaderTextMode::Reflow => wrap_reflow_text(&text, width as usize),
+                        let lines = text.lines().count() as u16;
+                        if lines == 0 {
+                            self.scroll = 0;
+                        } else {
+                            self.scroll = self.scroll.min(lines.saturating_sub(1));
                         }
-                    };
-                    let lines = text.lines().count() as u16;
-                    if lines == 0 {
-                        self.scroll = 0;
-                    } else {
-                        self.scroll = self.scroll.min(lines.saturating_sub(1));
+                        self.current_text = Some(text);
+                        self.current_image = None;
+                        self.last_error = None;
+                        self.last_image_timings = None;
                     }
-                    self.current_text = Some(text);
-                    self.current_image = None;
-                    self.last_error = None;
-                    self.last_image_timings = None;
-                }
-                Err(err) => {
-                    self.current_text = None;
-                    self.current_image = None;
-                    self.last_error = Some(err.to_string());
-                    self.last_image_timings = None;
-                }
+                    Err(err) => {
+                        self.current_text = None;
+                        self.current_image = None;
+                        self.last_error = Some(err.to_string());
+                        self.last_image_timings = None;
+                    }
                 }
             }
         }
@@ -3150,7 +3473,11 @@ fn non_text_placeholder(width: u16, height: u16, label: &str) -> String {
     out.push('┐');
 
     let label = label.trim();
-    let label = if label.is_empty() { "image/chart" } else { label };
+    let label = if label.is_empty() {
+        "image/chart"
+    } else {
+        label
+    };
 
     for y in 0..inner_h {
         out.push('\n');

@@ -347,6 +347,69 @@ pub struct Book {
     pub path: String,
     pub title: String,
     pub last_opened: Option<i64>,
+    #[serde(default)]
+    pub favorite: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagKind {
+    Tag,
+    Collection,
+}
+
+impl TagKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TagKind::Tag => "tag",
+            TagKind::Collection => "collection",
+        }
+    }
+}
+
+impl std::fmt::Display for TagKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TagKind {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tag" => Ok(TagKind::Tag),
+            "collection" => Ok(TagKind::Collection),
+            _ => Err("unknown TagKind"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BookLabels {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub collection: Option<String>,
+}
+
+impl BookLabels {
+    pub fn normalize(&mut self) {
+        self.tags = self
+            .tags
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        self.tags
+            .sort_by(|a, b| a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase()));
+        self.tags.dedup();
+
+        self.collection = self.collection.as_ref().map(|c| c.trim().to_string());
+        if self.collection.as_deref().is_some_and(|c| c.is_empty()) {
+            self.collection = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,8 +484,14 @@ mod tests {
 
     #[test]
     fn reader_text_mode_parses_strings() {
-        assert_eq!("raw".parse::<ReaderTextMode>().unwrap(), ReaderTextMode::Raw);
-        assert_eq!(" WRAP ".parse::<ReaderTextMode>().unwrap(), ReaderTextMode::Wrap);
+        assert_eq!(
+            "raw".parse::<ReaderTextMode>().unwrap(),
+            ReaderTextMode::Raw
+        );
+        assert_eq!(
+            " WRAP ".parse::<ReaderTextMode>().unwrap(),
+            ReaderTextMode::Wrap
+        );
         assert_eq!(
             "Reflow".parse::<ReaderTextMode>().unwrap(),
             ReaderTextMode::Reflow
