@@ -368,6 +368,61 @@ impl Storage {
         Ok(out)
     }
 
+    pub fn list_tag_names(&self, kind: TagKind) -> anyhow::Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name FROM tags WHERE kind = ? ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([kind.as_str()], |row| row.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn create_tag(&self, name: &str, kind: TagKind) -> anyhow::Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("tag name cannot be empty");
+        }
+        self.conn.execute(
+            "INSERT INTO tags (name, kind) VALUES (?, ?) ON CONFLICT(name, kind) DO NOTHING",
+            (name, kind.as_str()),
+        )?;
+        Ok(())
+    }
+
+    pub fn rename_tag(&self, from: &str, to: &str, kind: TagKind) -> anyhow::Result<()> {
+        let from = from.trim();
+        let to = to.trim();
+        if from.is_empty() {
+            anyhow::bail!("tag name cannot be empty");
+        }
+        if to.is_empty() {
+            anyhow::bail!("tag name cannot be empty");
+        }
+        if from == to {
+            return Ok(());
+        }
+
+        let updated = self.conn.execute(
+            "UPDATE tags SET name = ? WHERE name = ? AND kind = ?",
+            (to, from, kind.as_str()),
+        )?;
+        if updated == 0 {
+            anyhow::bail!("tag not found");
+        }
+        Ok(())
+    }
+
+    pub fn delete_tag(&self, name: &str, kind: TagKind) -> anyhow::Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("tag name cannot be empty");
+        }
+        self.conn.execute(
+            "DELETE FROM tags WHERE name = ? AND kind = ?",
+            (name, kind.as_str()),
+        )?;
+        Ok(())
+    }
+
     pub fn save_labels(&self, path: &str, labels: &BookLabels) -> anyhow::Result<()> {
         let mut labels = labels.clone();
         labels.normalize();
@@ -624,6 +679,52 @@ mod tests {
 
         storage.delete_book_by_path(&book.path)?;
         assert!(storage.list_labels_by_path()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn tag_catalog_rename_and_delete_updates_labels() -> anyhow::Result<()> {
+        let storage = open_in_memory()?;
+        let book = Book {
+            path: "/a/b.pdf".to_string(),
+            title: "b".to_string(),
+            last_opened: None,
+            favorite: false,
+        };
+        storage.upsert_book(&book)?;
+
+        storage.save_labels(
+            &book.path,
+            &BookLabels {
+                tags: vec!["rust".to_string()],
+                collection: Some("work".to_string()),
+            },
+        )?;
+
+        storage.create_tag("unused", TagKind::Tag)?;
+        assert_eq!(
+            storage.list_tag_names(TagKind::Tag)?,
+            vec!["rust".to_string(), "unused".to_string()]
+        );
+        assert_eq!(
+            storage.list_tag_names(TagKind::Collection)?,
+            vec!["work".to_string()]
+        );
+
+        storage.rename_tag("rust", "systems", TagKind::Tag)?;
+        let labels = storage.list_labels_by_path()?;
+        assert_eq!(
+            labels.get(&book.path).cloned(),
+            Some(BookLabels {
+                tags: vec!["systems".to_string()],
+                collection: Some("work".to_string())
+            })
+        );
+
+        storage.delete_tag("work", TagKind::Collection)?;
+        storage.delete_tag("systems", TagKind::Tag)?;
+        let labels = storage.list_labels_by_path()?;
+        assert_eq!(labels.get(&book.path).cloned(), None);
         Ok(())
     }
 

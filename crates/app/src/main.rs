@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use bookshelf_application::AppContext;
-use bookshelf_core::{Book, ScanScope, Settings, encode_path};
+use bookshelf_core::{Book, ScanScope, Settings, TagKind, encode_path};
 use bookshelf_storage::Storage;
 use bookshelf_ui::{Ui, UiExit};
 
@@ -34,6 +34,8 @@ fn run() -> anyhow::Result<()> {
     let books = storage.list_books()?;
     let progress_by_path = storage.list_progress()?;
     let labels_by_path = storage.list_labels_by_path()?;
+    let known_tags = storage.list_tag_names(TagKind::Tag)?;
+    let known_collections = storage.list_tag_names(TagKind::Collection)?;
     let bookmarks_by_path = storage.list_bookmarks_by_path()?;
     let notes_by_path = storage.list_notes_by_path()?;
 
@@ -41,6 +43,7 @@ fn run() -> anyhow::Result<()> {
         .with_library(cwd_str, books)
         .with_progress(progress_by_path)
         .with_labels(labels_by_path)
+        .with_label_catalog(known_tags, known_collections)
         .with_bookmarks(bookmarks_by_path)
         .with_notes(notes_by_path);
     loop {
@@ -48,6 +51,21 @@ fn run() -> anyhow::Result<()> {
         let outcome = ui.run()?;
         ctx = outcome.ctx;
         storage.save_settings(&ctx.settings)?;
+
+        let dirty_label_catalog_ops = std::mem::take(&mut ctx.dirty_label_catalog_ops);
+        for op in dirty_label_catalog_ops {
+            match op {
+                bookshelf_application::LabelCatalogOp::Create { kind, name } => {
+                    storage.create_tag(&name, kind)?;
+                }
+                bookshelf_application::LabelCatalogOp::Rename { kind, from, to } => {
+                    storage.rename_tag(&from, &to, kind)?;
+                }
+                bookshelf_application::LabelCatalogOp::Delete { kind, name } => {
+                    storage.delete_tag(&name, kind)?;
+                }
+            }
+        }
 
         let dirty_favorite_paths = std::mem::take(&mut ctx.dirty_favorite_paths);
         for path in dirty_favorite_paths {
@@ -92,6 +110,8 @@ fn run() -> anyhow::Result<()> {
                 let books = storage.list_books()?;
                 let progress_by_path = storage.list_progress()?;
                 let labels_by_path = storage.list_labels_by_path()?;
+                let known_tags = storage.list_tag_names(TagKind::Tag)?;
+                let known_collections = storage.list_tag_names(TagKind::Collection)?;
                 let bookmarks_by_path = storage.list_bookmarks_by_path()?;
                 let notes_by_path = storage.list_notes_by_path()?;
                 let cwd_str = ctx.cwd.clone();
@@ -99,6 +119,7 @@ fn run() -> anyhow::Result<()> {
                     .with_library(cwd_str, books)
                     .with_progress(progress_by_path)
                     .with_labels(labels_by_path)
+                    .with_label_catalog(known_tags, known_collections)
                     .with_bookmarks(bookmarks_by_path)
                     .with_notes(notes_by_path);
             }

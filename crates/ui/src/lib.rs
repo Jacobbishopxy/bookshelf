@@ -9,9 +9,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use bookshelf_application::{AppContext, CollectionFilter, TagMatchMode};
+use bookshelf_application::{AppContext, CollectionFilter, LabelCatalogOp, TagMatchMode};
 use bookshelf_core::{
-    Book, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings, TocItem,
+    Book, BookLabels, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings,
+    TagKind, TocItem,
 };
 use bookshelf_engine::{Engine, PageFurniture};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -53,6 +54,9 @@ pub struct Ui {
     search_panel: SearchPanel,
     label_input_panel: LabelInputPanel,
     label_browse_panel: LabelBrowsePanel,
+    label_manager_panel: LabelManagerPanel,
+    assign_labels_panel: AssignLabelsPanel,
+    label_catalog_input_panel: LabelCatalogInputPanel,
     goto_panel: GotoPanel,
     bookmarks_panel: BookmarksPanel,
     notes_panel: NotesPanel,
@@ -74,6 +78,9 @@ impl Ui {
         let search_panel = SearchPanel::default();
         let label_input_panel = LabelInputPanel::default();
         let label_browse_panel = LabelBrowsePanel::default();
+        let label_manager_panel = LabelManagerPanel::default();
+        let assign_labels_panel = AssignLabelsPanel::default();
+        let label_catalog_input_panel = LabelCatalogInputPanel::default();
         let goto_panel = GotoPanel::default();
         let bookmarks_panel = BookmarksPanel::default();
         let notes_panel = NotesPanel::default();
@@ -88,6 +95,9 @@ impl Ui {
             search_panel,
             label_input_panel,
             label_browse_panel,
+            label_manager_panel,
+            assign_labels_panel,
+            label_catalog_input_panel,
             goto_panel,
             bookmarks_panel,
             notes_panel,
@@ -303,6 +313,27 @@ impl Ui {
                                 exit,
                             });
                         }
+                    } else if self.label_catalog_input_panel.open {
+                        if let Some(exit) = self.handle_label_catalog_input_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.label_manager_panel.open {
+                        if let Some(exit) = self.handle_label_manager_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
+                    } else if self.assign_labels_panel.open {
+                        if let Some(exit) = self.handle_assign_labels_panel_key(key)? {
+                            return Ok(UiOutcome {
+                                ctx: self.ctx.clone(),
+                                exit,
+                            });
+                        }
                     } else if self.label_browse_panel.open {
                         if let Some(exit) = self.handle_label_browse_panel_key(key)? {
                             return Ok(UiOutcome {
@@ -360,8 +391,16 @@ impl Ui {
                 self.open_label_input_panel(LabelInputMode::Collection);
                 Ok(None)
             }
+            KeyCode::Char('a') => {
+                self.open_assign_labels_panel();
+                Ok(None)
+            }
             KeyCode::Char('l') => {
                 self.open_label_browse_panel();
+                Ok(None)
+            }
+            KeyCode::Char('m') => {
+                self.open_label_manager_panel();
                 Ok(None)
             }
             KeyCode::Char('s') => {
@@ -419,6 +458,9 @@ impl Ui {
         });
         self.label_input_panel.open = false;
         self.label_browse_panel.open = false;
+        self.label_manager_panel.open = false;
+        self.assign_labels_panel.open = false;
+        self.label_catalog_input_panel.open = false;
         self.settings_panel.open = false;
         self.scan_panel.open = false;
         self.normalize_selection_to_visible();
@@ -1505,6 +1547,9 @@ impl Ui {
         self.settings_panel.open = false;
         self.scan_panel.open = false;
         self.label_browse_panel.open = false;
+        self.label_manager_panel.open = false;
+        self.assign_labels_panel.open = false;
+        self.label_catalog_input_panel.open = false;
     }
 
     fn selected_book_path(&self) -> Option<String> {
@@ -1521,6 +1566,85 @@ impl Ui {
 
         self.search_panel.open = false;
         self.label_input_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+        self.label_manager_panel.open = false;
+        self.assign_labels_panel.open = false;
+        self.label_catalog_input_panel.open = false;
+        self.normalize_selection_to_visible();
+    }
+
+    fn open_label_manager_panel(&mut self) {
+        self.label_manager_panel.open = true;
+        self.label_manager_panel.filter_editing = false;
+        self.label_manager_panel.confirm_delete = None;
+        self.label_manager_panel.error = None;
+
+        self.search_panel.open = false;
+        self.label_input_panel.open = false;
+        self.label_browse_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+        self.assign_labels_panel.open = false;
+        self.label_catalog_input_panel.open = false;
+        self.normalize_selection_to_visible();
+    }
+
+    fn open_assign_labels_panel(&mut self) {
+        self.assign_labels_panel.open = true;
+        self.assign_labels_panel.focus = AssignFocus::Collections;
+        self.assign_labels_panel.collection_cursor = 0;
+        self.assign_labels_panel.tag_cursor = 0;
+        self.assign_labels_panel.collection_query.clear();
+        self.assign_labels_panel.tag_query.clear();
+        self.assign_labels_panel.query_editing = false;
+        self.assign_labels_panel.error = None;
+
+        if let Some(path) = self.selected_book_path() {
+            let mut labels = self
+                .ctx
+                .labels_by_path
+                .get(&path)
+                .cloned()
+                .unwrap_or_default();
+            labels.normalize();
+            self.assign_labels_panel.book_path = Some(path);
+            self.assign_labels_panel.staged = labels;
+        } else {
+            self.assign_labels_panel.book_path = None;
+            self.assign_labels_panel.staged = BookLabels::default();
+            self.assign_labels_panel.error = Some("No selection".to_string());
+        }
+
+        self.search_panel.open = false;
+        self.label_input_panel.open = false;
+        self.label_browse_panel.open = false;
+        self.label_manager_panel.open = false;
+        self.settings_panel.open = false;
+        self.scan_panel.open = false;
+        self.label_catalog_input_panel.open = false;
+        self.normalize_selection_to_visible();
+    }
+
+    fn open_label_catalog_input_panel(
+        &mut self,
+        target: LabelCatalogInputTarget,
+        mode: LabelCatalogInputMode,
+        kind: TagKind,
+        from: Option<String>,
+        prefill: String,
+    ) {
+        self.label_catalog_input_panel.open = true;
+        self.label_catalog_input_panel.target = target;
+        self.label_catalog_input_panel.mode = mode;
+        self.label_catalog_input_panel.kind = kind;
+        self.label_catalog_input_panel.from = from;
+        self.label_catalog_input_panel.input = prefill;
+        self.label_catalog_input_panel.error = None;
+
+        self.search_panel.open = false;
+        self.label_input_panel.open = false;
+        self.label_browse_panel.open = false;
         self.settings_panel.open = false;
         self.scan_panel.open = false;
         self.normalize_selection_to_visible();
@@ -1716,6 +1840,7 @@ impl Ui {
                 }
 
                 labels.normalize();
+                self.ctx.ensure_known_labels(&labels);
                 if labels.tags.is_empty() && labels.collection.is_none() {
                     self.ctx.labels_by_path.remove(&path);
                 } else {
@@ -1735,6 +1860,732 @@ impl Ui {
             KeyCode::Char(ch) => {
                 if !ch.is_control() {
                     self.label_input_panel.input.push(ch);
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn label_manager_entries(&self, tab: LabelManagerTab) -> Vec<(String, usize)> {
+        let query = self.label_manager_panel.filter.trim().to_ascii_lowercase();
+
+        let mut collection_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut tag_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for labels in self.ctx.labels_by_path.values() {
+            if let Some(col) = labels.collection.as_deref() {
+                let col = col.trim();
+                if !col.is_empty() {
+                    *collection_counts
+                        .entry(col.to_ascii_lowercase())
+                        .or_insert(0) += 1;
+                }
+            }
+            for tag in &labels.tags {
+                let tag = tag.trim();
+                if tag.is_empty() {
+                    continue;
+                }
+                *tag_counts.entry(tag.to_ascii_lowercase()).or_insert(0) += 1;
+            }
+        }
+
+        let names: &[String] = match tab {
+            LabelManagerTab::Collections => &self.ctx.known_collections,
+            LabelManagerTab::Tags => &self.ctx.known_tags,
+        };
+
+        let mut out = Vec::new();
+        for name in names {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !query.is_empty() && !trimmed.to_ascii_lowercase().contains(&query) {
+                continue;
+            }
+
+            let count = match tab {
+                LabelManagerTab::Collections => collection_counts
+                    .get(&trimmed.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0),
+                LabelManagerTab::Tags => tag_counts
+                    .get(&trimmed.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0),
+            };
+            out.push((trimmed.to_string(), count));
+        }
+        out
+    }
+
+    fn label_manager_selected_target(&self) -> Option<LabelDeleteTarget> {
+        let tab = self.label_manager_panel.tab;
+        let entries = self.label_manager_entries(tab);
+        let cursor = match tab {
+            LabelManagerTab::Collections => self.label_manager_panel.collections_cursor,
+            LabelManagerTab::Tags => self.label_manager_panel.tags_cursor,
+        };
+        let (name, _count) = entries.get(cursor).cloned()?;
+        let kind = match tab {
+            LabelManagerTab::Collections => TagKind::Collection,
+            LabelManagerTab::Tags => TagKind::Tag,
+        };
+        Some(LabelDeleteTarget { kind, name })
+    }
+
+    fn handle_label_manager_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if let Some(target) = self.label_manager_panel.confirm_delete.clone() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    self.apply_delete_label(&target);
+                    self.label_manager_panel.confirm_delete = None;
+                    self.label_manager_panel.error = None;
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.label_manager_panel.confirm_delete = None;
+                }
+                _ => {}
+            }
+            return Ok(None);
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.label_manager_panel.filter.clear();
+            self.label_manager_panel.filter_editing = false;
+            self.label_manager_panel.error = None;
+            return Ok(None);
+        }
+
+        if self.label_manager_panel.filter_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.label_manager_panel.filter_editing = false;
+                }
+                KeyCode::Backspace => {
+                    self.label_manager_panel.filter.pop();
+                }
+                KeyCode::Tab => {
+                    self.label_manager_panel.filter_editing = false;
+                    self.label_manager_panel.tab = match self.label_manager_panel.tab {
+                        LabelManagerTab::Collections => LabelManagerTab::Tags,
+                        LabelManagerTab::Tags => LabelManagerTab::Collections,
+                    };
+                }
+                KeyCode::Char(ch) => {
+                    if !ch.is_control() {
+                        self.label_manager_panel.filter.push(ch);
+                    }
+                }
+                _ => {}
+            }
+
+            let entries = self.label_manager_entries(self.label_manager_panel.tab);
+            let cursor = match self.label_manager_panel.tab {
+                LabelManagerTab::Collections => &mut self.label_manager_panel.collections_cursor,
+                LabelManagerTab::Tags => &mut self.label_manager_panel.tags_cursor,
+            };
+            if entries.is_empty() {
+                *cursor = 0;
+            } else {
+                *cursor = (*cursor).min(entries.len().saturating_sub(1));
+            }
+            return Ok(None);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.label_manager_panel.open = false;
+                self.label_manager_panel.confirm_delete = None;
+                self.label_manager_panel.filter_editing = false;
+                self.label_manager_panel.error = None;
+                Ok(None)
+            }
+            KeyCode::Tab => {
+                self.label_manager_panel.tab = match self.label_manager_panel.tab {
+                    LabelManagerTab::Collections => LabelManagerTab::Tags,
+                    LabelManagerTab::Tags => LabelManagerTab::Collections,
+                };
+                Ok(None)
+            }
+            KeyCode::Char('/') => {
+                self.label_manager_panel.filter_editing = true;
+                Ok(None)
+            }
+            KeyCode::Up => {
+                let cursor = match self.label_manager_panel.tab {
+                    LabelManagerTab::Collections => {
+                        &mut self.label_manager_panel.collections_cursor
+                    }
+                    LabelManagerTab::Tags => &mut self.label_manager_panel.tags_cursor,
+                };
+                *cursor = cursor.saturating_sub(1);
+                Ok(None)
+            }
+            KeyCode::Down => {
+                let entries = self.label_manager_entries(self.label_manager_panel.tab);
+                let cursor = match self.label_manager_panel.tab {
+                    LabelManagerTab::Collections => {
+                        &mut self.label_manager_panel.collections_cursor
+                    }
+                    LabelManagerTab::Tags => &mut self.label_manager_panel.tags_cursor,
+                };
+                if !entries.is_empty() {
+                    *cursor = (*cursor).saturating_add(1).min(entries.len() - 1);
+                }
+                Ok(None)
+            }
+            KeyCode::Char('n') => {
+                let kind = match self.label_manager_panel.tab {
+                    LabelManagerTab::Collections => TagKind::Collection,
+                    LabelManagerTab::Tags => TagKind::Tag,
+                };
+                let prefill = self.label_manager_panel.filter.clone();
+                self.open_label_catalog_input_panel(
+                    LabelCatalogInputTarget::Manager,
+                    LabelCatalogInputMode::Create,
+                    kind,
+                    None,
+                    prefill,
+                );
+                Ok(None)
+            }
+            KeyCode::Char('r') => {
+                let Some(target) = self.label_manager_selected_target() else {
+                    self.label_manager_panel.error = Some("Nothing selected".to_string());
+                    return Ok(None);
+                };
+                self.open_label_catalog_input_panel(
+                    LabelCatalogInputTarget::Manager,
+                    LabelCatalogInputMode::Rename,
+                    target.kind,
+                    Some(target.name.clone()),
+                    target.name,
+                );
+                Ok(None)
+            }
+            KeyCode::Char('d') => {
+                let Some(target) = self.label_manager_selected_target() else {
+                    self.label_manager_panel.error = Some("Nothing selected".to_string());
+                    return Ok(None);
+                };
+                self.label_manager_panel.confirm_delete = Some(target);
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn assign_visible_collections(&self) -> Vec<String> {
+        let query = self
+            .assign_labels_panel
+            .collection_query
+            .trim()
+            .to_ascii_lowercase();
+        self.ctx
+            .known_collections
+            .iter()
+            .filter(|c| {
+                let c = c.trim();
+                !c.is_empty() && (query.is_empty() || c.to_ascii_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn assign_visible_tags(&self) -> Vec<String> {
+        let query = self
+            .assign_labels_panel
+            .tag_query
+            .trim()
+            .to_ascii_lowercase();
+        self.ctx
+            .known_tags
+            .iter()
+            .filter(|t| {
+                let t = t.trim();
+                !t.is_empty() && (query.is_empty() || t.to_ascii_lowercase().contains(&query))
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn commit_assign_labels_panel(&mut self) {
+        let Some(path) = self.assign_labels_panel.book_path.clone() else {
+            self.assign_labels_panel.open = false;
+            return;
+        };
+
+        let mut labels = self.assign_labels_panel.staged.clone();
+        labels.normalize();
+        self.ctx.ensure_known_labels(&labels);
+        if labels.tags.is_empty() && labels.collection.is_none() {
+            self.ctx.labels_by_path.remove(&path);
+        } else {
+            self.ctx.labels_by_path.insert(path.clone(), labels);
+        }
+        self.ctx.dirty_label_paths.insert(path);
+
+        self.assign_labels_panel.open = false;
+        self.assign_labels_panel.query_editing = false;
+        self.assign_labels_panel.error = None;
+    }
+
+    fn handle_assign_labels_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
+        if self.assign_labels_panel.book_path.is_none() {
+            if key.code == KeyCode::Esc {
+                self.assign_labels_panel.open = false;
+                self.assign_labels_panel.error = None;
+            }
+            return Ok(None);
+        }
+
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            match self.assign_labels_panel.focus {
+                AssignFocus::Collections => self.assign_labels_panel.collection_query.clear(),
+                AssignFocus::Tags => self.assign_labels_panel.tag_query.clear(),
+            }
+            return Ok(None);
+        }
+
+        if self.assign_labels_panel.query_editing {
+            match key.code {
+                KeyCode::Esc => {
+                    self.assign_labels_panel.query_editing = false;
+                }
+                KeyCode::Enter => {
+                    self.commit_assign_labels_panel();
+                }
+                KeyCode::Backspace => match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => {
+                        self.assign_labels_panel.collection_query.pop();
+                    }
+                    AssignFocus::Tags => {
+                        self.assign_labels_panel.tag_query.pop();
+                    }
+                },
+                KeyCode::Tab => {
+                    self.assign_labels_panel.query_editing = false;
+                    self.assign_labels_panel.focus = match self.assign_labels_panel.focus {
+                        AssignFocus::Collections => AssignFocus::Tags,
+                        AssignFocus::Tags => AssignFocus::Collections,
+                    };
+                }
+                KeyCode::Char(ch) => {
+                    if !ch.is_control() {
+                        match self.assign_labels_panel.focus {
+                            AssignFocus::Collections => {
+                                self.assign_labels_panel.collection_query.push(ch);
+                            }
+                            AssignFocus::Tags => {
+                                self.assign_labels_panel.tag_query.push(ch);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            let collections = self.assign_visible_collections();
+            let tags = self.assign_visible_tags();
+            self.assign_labels_panel.collection_cursor = self
+                .assign_labels_panel
+                .collection_cursor
+                .min(collections.len()); // +1 for "(none)"
+            if tags.is_empty() {
+                self.assign_labels_panel.tag_cursor = 0;
+            } else {
+                self.assign_labels_panel.tag_cursor =
+                    self.assign_labels_panel.tag_cursor.min(tags.len() - 1);
+            }
+            return Ok(None);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.assign_labels_panel.open = false;
+                self.assign_labels_panel.query_editing = false;
+                self.assign_labels_panel.error = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                self.commit_assign_labels_panel();
+                Ok(None)
+            }
+            KeyCode::Tab => {
+                self.assign_labels_panel.focus = match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => AssignFocus::Tags,
+                    AssignFocus::Tags => AssignFocus::Collections,
+                };
+                Ok(None)
+            }
+            KeyCode::Char('/') => {
+                self.assign_labels_panel.query_editing = true;
+                Ok(None)
+            }
+            KeyCode::Up => {
+                match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => {
+                        self.assign_labels_panel.collection_cursor =
+                            self.assign_labels_panel.collection_cursor.saturating_sub(1);
+                    }
+                    AssignFocus::Tags => {
+                        self.assign_labels_panel.tag_cursor =
+                            self.assign_labels_panel.tag_cursor.saturating_sub(1);
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Down => {
+                match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => {
+                        let collections = self.assign_visible_collections();
+                        let max = collections.len() + 1;
+                        if max > 0 {
+                            self.assign_labels_panel.collection_cursor = self
+                                .assign_labels_panel
+                                .collection_cursor
+                                .saturating_add(1)
+                                .min(max - 1);
+                        }
+                    }
+                    AssignFocus::Tags => {
+                        let tags = self.assign_visible_tags();
+                        if !tags.is_empty() {
+                            self.assign_labels_panel.tag_cursor = self
+                                .assign_labels_panel
+                                .tag_cursor
+                                .saturating_add(1)
+                                .min(tags.len() - 1);
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Char(' ') => {
+                match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => {
+                        let collections = self.assign_visible_collections();
+                        if self.assign_labels_panel.collection_cursor == 0 {
+                            self.assign_labels_panel.staged.collection = None;
+                        } else if let Some(name) = collections
+                            .get(self.assign_labels_panel.collection_cursor - 1)
+                            .cloned()
+                        {
+                            self.assign_labels_panel.staged.collection = Some(name);
+                        }
+                    }
+                    AssignFocus::Tags => {
+                        let tags = self.assign_visible_tags();
+                        let Some(name) = tags.get(self.assign_labels_panel.tag_cursor).cloned()
+                        else {
+                            return Ok(None);
+                        };
+                        if let Some(pos) = self
+                            .assign_labels_panel
+                            .staged
+                            .tags
+                            .iter()
+                            .position(|t| t.eq_ignore_ascii_case(&name))
+                        {
+                            self.assign_labels_panel.staged.tags.remove(pos);
+                        } else {
+                            self.assign_labels_panel.staged.tags.push(name);
+                        }
+                        self.assign_labels_panel.staged.normalize();
+                    }
+                }
+                Ok(None)
+            }
+            KeyCode::Char('n') => {
+                let (kind, prefill) = match self.assign_labels_panel.focus {
+                    AssignFocus::Collections => (
+                        TagKind::Collection,
+                        self.assign_labels_panel.collection_query.clone(),
+                    ),
+                    AssignFocus::Tags => (TagKind::Tag, self.assign_labels_panel.tag_query.clone()),
+                };
+                self.open_label_catalog_input_panel(
+                    LabelCatalogInputTarget::Assign,
+                    LabelCatalogInputMode::Create,
+                    kind,
+                    None,
+                    prefill,
+                );
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn remove_name_case_insensitive(values: &mut Vec<String>, name: &str) {
+        values.retain(|v| !v.eq_ignore_ascii_case(name));
+    }
+
+    fn apply_delete_label(&mut self, target: &LabelDeleteTarget) {
+        self.ctx
+            .dirty_label_catalog_ops
+            .push(LabelCatalogOp::Delete {
+                kind: target.kind,
+                name: target.name.clone(),
+            });
+        match target.kind {
+            TagKind::Tag => {
+                Self::remove_name_case_insensitive(&mut self.ctx.known_tags, &target.name);
+                self.ctx
+                    .tag_filters
+                    .retain(|t| !t.eq_ignore_ascii_case(&target.name));
+                self.normalize_tag_filters();
+            }
+            TagKind::Collection => {
+                Self::remove_name_case_insensitive(&mut self.ctx.known_collections, &target.name);
+                if let CollectionFilter::Selected(selected) = &self.ctx.collection_filter
+                    && selected.eq_ignore_ascii_case(&target.name)
+                {
+                    self.ctx.collection_filter = CollectionFilter::Any;
+                }
+            }
+        }
+        self.ctx.normalize_label_catalog();
+
+        let mut to_remove = Vec::new();
+        for (path, labels) in self.ctx.labels_by_path.iter_mut() {
+            match target.kind {
+                TagKind::Tag => {
+                    labels
+                        .tags
+                        .retain(|t| !t.eq_ignore_ascii_case(&target.name));
+                }
+                TagKind::Collection => {
+                    if labels
+                        .collection
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case(&target.name))
+                    {
+                        labels.collection = None;
+                    }
+                }
+            }
+            labels.normalize();
+            if labels.tags.is_empty() && labels.collection.is_none() {
+                to_remove.push(path.clone());
+            }
+        }
+        for path in to_remove {
+            self.ctx.labels_by_path.remove(&path);
+        }
+    }
+
+    fn apply_rename_label(&mut self, kind: TagKind, from: &str, to: &str) -> bool {
+        let from = from.trim();
+        let to = to.trim();
+        if from.is_empty() || to.is_empty() {
+            return false;
+        }
+
+        let list = match kind {
+            TagKind::Tag => &mut self.ctx.known_tags,
+            TagKind::Collection => &mut self.ctx.known_collections,
+        };
+        let Some(pos) = list.iter().position(|v| v.eq_ignore_ascii_case(from)) else {
+            return false;
+        };
+        list[pos] = to.to_string();
+        self.ctx.normalize_label_catalog();
+
+        match kind {
+            TagKind::Tag => {
+                for tag in &mut self.ctx.tag_filters {
+                    if tag.eq_ignore_ascii_case(from) {
+                        *tag = to.to_string();
+                    }
+                }
+                self.normalize_tag_filters();
+            }
+            TagKind::Collection => {
+                if let CollectionFilter::Selected(selected) = &mut self.ctx.collection_filter
+                    && selected.eq_ignore_ascii_case(from)
+                {
+                    *selected = to.to_string();
+                }
+            }
+        }
+
+        let mut to_remove = Vec::new();
+        for (path, labels) in self.ctx.labels_by_path.iter_mut() {
+            match kind {
+                TagKind::Tag => {
+                    for tag in &mut labels.tags {
+                        if tag.eq_ignore_ascii_case(from) {
+                            *tag = to.to_string();
+                        }
+                    }
+                }
+                TagKind::Collection => {
+                    if labels
+                        .collection
+                        .as_deref()
+                        .is_some_and(|c| c.eq_ignore_ascii_case(from))
+                    {
+                        labels.collection = Some(to.to_string());
+                    }
+                }
+            }
+            labels.normalize();
+            if labels.tags.is_empty() && labels.collection.is_none() {
+                to_remove.push(path.clone());
+            }
+        }
+        for path in to_remove {
+            self.ctx.labels_by_path.remove(&path);
+        }
+        true
+    }
+
+    fn handle_label_catalog_input_panel_key(
+        &mut self,
+        key: KeyEvent,
+    ) -> anyhow::Result<Option<UiExit>> {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && let KeyCode::Char('u') = key.code
+        {
+            self.label_catalog_input_panel.input.clear();
+            return Ok(None);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.label_catalog_input_panel.open = false;
+                self.label_catalog_input_panel.error = None;
+                self.label_catalog_input_panel.input.clear();
+                self.label_catalog_input_panel.from = None;
+                Ok(None)
+            }
+            KeyCode::Enter => {
+                let name = self.label_catalog_input_panel.input.trim().to_string();
+                if name.is_empty() {
+                    self.label_catalog_input_panel.error =
+                        Some(match self.label_catalog_input_panel.kind {
+                            TagKind::Tag => "Enter a tag name".to_string(),
+                            TagKind::Collection => "Enter a collection name".to_string(),
+                        });
+                    return Ok(None);
+                }
+
+                match self.label_catalog_input_panel.mode {
+                    LabelCatalogInputMode::Create => {
+                        let exists = match self.label_catalog_input_panel.kind {
+                            TagKind::Tag => self
+                                .ctx
+                                .known_tags
+                                .iter()
+                                .any(|t| t.eq_ignore_ascii_case(&name)),
+                            TagKind::Collection => self
+                                .ctx
+                                .known_collections
+                                .iter()
+                                .any(|c| c.eq_ignore_ascii_case(&name)),
+                        };
+                        if exists {
+                            self.label_catalog_input_panel.error =
+                                Some("Already exists".to_string());
+                            return Ok(None);
+                        }
+
+                        match self.label_catalog_input_panel.kind {
+                            TagKind::Tag => self.ctx.known_tags.push(name.clone()),
+                            TagKind::Collection => self.ctx.known_collections.push(name.clone()),
+                        }
+                        self.ctx.normalize_label_catalog();
+                        self.ctx
+                            .dirty_label_catalog_ops
+                            .push(LabelCatalogOp::Create {
+                                kind: self.label_catalog_input_panel.kind,
+                                name: name.clone(),
+                            });
+
+                        if self.label_catalog_input_panel.target == LabelCatalogInputTarget::Assign
+                        {
+                            match self.label_catalog_input_panel.kind {
+                                TagKind::Tag => {
+                                    if !self
+                                        .assign_labels_panel
+                                        .staged
+                                        .tags
+                                        .iter()
+                                        .any(|t| t.eq_ignore_ascii_case(&name))
+                                    {
+                                        self.assign_labels_panel.staged.tags.push(name.clone());
+                                        self.assign_labels_panel.staged.normalize();
+                                    }
+                                }
+                                TagKind::Collection => {
+                                    self.assign_labels_panel.staged.collection = Some(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    LabelCatalogInputMode::Rename => {
+                        let Some(from) = self.label_catalog_input_panel.from.clone() else {
+                            self.label_catalog_input_panel.error =
+                                Some("Nothing selected".to_string());
+                            return Ok(None);
+                        };
+
+                        let conflicts = match self.label_catalog_input_panel.kind {
+                            TagKind::Tag => self.ctx.known_tags.iter().any(|t| {
+                                t.eq_ignore_ascii_case(&name) && !t.eq_ignore_ascii_case(&from)
+                            }),
+                            TagKind::Collection => self.ctx.known_collections.iter().any(|c| {
+                                c.eq_ignore_ascii_case(&name) && !c.eq_ignore_ascii_case(&from)
+                            }),
+                        };
+                        if conflicts {
+                            self.label_catalog_input_panel.error =
+                                Some("Already exists".to_string());
+                            return Ok(None);
+                        }
+
+                        if !self.apply_rename_label(
+                            self.label_catalog_input_panel.kind,
+                            &from,
+                            &name,
+                        ) {
+                            self.label_catalog_input_panel.error =
+                                Some("Nothing selected".to_string());
+                            return Ok(None);
+                        }
+
+                        self.ctx
+                            .dirty_label_catalog_ops
+                            .push(LabelCatalogOp::Rename {
+                                kind: self.label_catalog_input_panel.kind,
+                                from,
+                                to: name.clone(),
+                            });
+                    }
+                }
+
+                self.label_catalog_input_panel.open = false;
+                self.label_catalog_input_panel.error = None;
+                self.label_catalog_input_panel.input.clear();
+                self.label_catalog_input_panel.from = None;
+                Ok(None)
+            }
+            KeyCode::Backspace => {
+                self.label_catalog_input_panel.input.pop();
+                Ok(None)
+            }
+            KeyCode::Char(ch) => {
+                if !ch.is_control() {
+                    self.label_catalog_input_panel.input.push(ch);
                 }
                 Ok(None)
             }
@@ -1854,7 +2705,52 @@ impl Ui {
     fn main_footer_spans(&self) -> Vec<Span<'static>> {
         let query = self.ctx.library_query.trim();
 
-        let mut spans = if self.label_input_panel.open {
+        let mut spans = if self.label_catalog_input_panel.open {
+            vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" apply  "),
+                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" delete  "),
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear"),
+            ]
+        } else if self.label_manager_panel.open {
+            vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" close  "),
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" switch tab  "),
+                Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" filter  "),
+                Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" new  "),
+                Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" rename  "),
+                Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" delete  "),
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move"),
+            ]
+        } else if self.assign_labels_panel.open {
+            vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" apply  "),
+                Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" focus  "),
+                Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" filter  "),
+                Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" new  "),
+                Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" toggle  "),
+                Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" move"),
+            ]
+        } else if self.label_input_panel.open {
             vec![
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel  "),
@@ -1905,10 +2801,10 @@ impl Ui {
                 Span::raw(" fav filter  "),
                 Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" favorite  "),
-                Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" tags  "),
-                Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" collection  "),
+                Span::styled("a", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" assign labels  "),
+                Span::styled("m", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" manage labels  "),
                 Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" settings  "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
@@ -2070,6 +2966,18 @@ impl Ui {
 
         if self.label_browse_panel.open {
             self.draw_label_browse_panel(area, frame);
+        }
+
+        if self.label_manager_panel.open {
+            self.draw_label_manager_panel(area, frame);
+        }
+
+        if self.assign_labels_panel.open {
+            self.draw_assign_labels_panel(area, frame);
+        }
+
+        if self.label_catalog_input_panel.open {
+            self.draw_label_catalog_input_panel(area, frame);
         }
     }
 
@@ -2569,6 +3477,403 @@ impl Ui {
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
         frame.render_widget(footer, sections[2]);
+    }
+
+    fn draw_label_manager_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(92, 82, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = match self.label_manager_panel.tab {
+            LabelManagerTab::Collections => "Manage labels — Collections",
+            LabelManagerTab::Tags => "Manage labels — Tags",
+        };
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(4),
+            ])
+            .split(inner);
+
+        let tab_style = |active: bool| {
+            if active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            }
+        };
+        let filter_style = if self.label_manager_panel.filter_editing {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let header_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "Collections",
+                    tab_style(self.label_manager_panel.tab == LabelManagerTab::Collections),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    "Tags",
+                    tab_style(self.label_manager_panel.tab == LabelManagerTab::Tags),
+                ),
+                Span::raw("  "),
+                Span::raw("(Tab to switch)"),
+            ]),
+            Line::from(vec![
+                Span::styled("Filter: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled(self.label_manager_panel.filter.clone(), filter_style),
+                Span::raw("  "),
+                Span::raw("(/ to edit, Ctrl+u clear)"),
+            ]),
+        ];
+        let header = Paragraph::new(Text::from(header_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(header, sections[0]);
+
+        let entries = self.label_manager_entries(self.label_manager_panel.tab);
+        let mut cursor = match self.label_manager_panel.tab {
+            LabelManagerTab::Collections => self.label_manager_panel.collections_cursor,
+            LabelManagerTab::Tags => self.label_manager_panel.tags_cursor,
+        };
+        if !entries.is_empty() {
+            cursor = cursor.min(entries.len() - 1);
+        } else {
+            cursor = 0;
+        }
+
+        let items: Vec<ListItem> = if entries.is_empty() {
+            vec![ListItem::new(Line::raw("(none)"))]
+        } else {
+            entries
+                .iter()
+                .map(|(name, count)| ListItem::new(Line::raw(format!("{name} ({count})"))))
+                .collect()
+        };
+
+        let highlight_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Labels"))
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut state = ListState::default();
+        if !entries.is_empty() {
+            state.select(Some(cursor));
+        }
+        frame.render_stateful_widget(list, sections[1], &mut state);
+
+        let mut footer_lines = Vec::new();
+        footer_lines.push(Line::from(vec![
+            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" new  "),
+            Span::styled("r", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" rename  "),
+            Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" delete  "),
+            Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" filter  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" close"),
+        ]));
+
+        if let Some(target) = &self.label_manager_panel.confirm_delete {
+            footer_lines.push(Line::raw(""));
+            footer_lines.push(Line::styled(
+                format!("Delete {} \"{}\"? (y/n)", target.kind, target.name),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(err) = &self.label_manager_panel.error {
+            footer_lines.push(Line::raw(""));
+            footer_lines.push(Line::styled(
+                err.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let footer = Paragraph::new(Text::from(footer_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(footer, sections[2]);
+    }
+
+    fn draw_assign_labels_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(92, 82, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = if let Some(path) = self.assign_labels_panel.book_path.as_deref()
+            && let Some(book) = self.ctx.books.iter().find(|b| b.path == path)
+        {
+            format!("Assign labels — {}", book.title)
+        } else {
+            "Assign labels".to_string()
+        };
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(0),
+                Constraint::Length(3),
+            ])
+            .split(inner);
+
+        let (filter_label, filter_value) = match self.assign_labels_panel.focus {
+            AssignFocus::Collections => (
+                "Filter (collections): ",
+                &self.assign_labels_panel.collection_query,
+            ),
+            AssignFocus::Tags => ("Filter (tags): ", &self.assign_labels_panel.tag_query),
+        };
+        let filter_style = if self.assign_labels_panel.query_editing {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let mut header_lines = Vec::new();
+        header_lines.push(Line::from(vec![
+            Span::styled(filter_label, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(filter_value.clone(), filter_style),
+            Span::raw("  "),
+            Span::raw("(/ to edit, Ctrl+u clear)"),
+        ]));
+
+        if let Some(err) = &self.assign_labels_panel.error {
+            header_lines.push(Line::styled(
+                err.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            header_lines.push(Line::raw(""));
+        }
+
+        let header = Paragraph::new(Text::from(header_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(header, sections[0]);
+
+        let body = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(sections[1]);
+
+        let highlight_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+
+        // Collections
+        let collections = self.assign_visible_collections();
+        let mut collection_cursor = self.assign_labels_panel.collection_cursor;
+        let collection_max = collections.len() + 1;
+        if collection_max > 0 {
+            collection_cursor = collection_cursor.min(collection_max - 1);
+        } else {
+            collection_cursor = 0;
+        }
+
+        let mut collection_items = Vec::new();
+        let none_selected = self.assign_labels_panel.staged.collection.is_none();
+        let prefix = if none_selected { "●" } else { " " };
+        collection_items.push(ListItem::new(Line::raw(format!("{prefix} (none)"))));
+        for name in &collections {
+            let selected = self
+                .assign_labels_panel
+                .staged
+                .collection
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case(name));
+            let prefix = if selected { "●" } else { " " };
+            collection_items.push(ListItem::new(Line::raw(format!("{prefix} {name}"))));
+        }
+
+        let collections_title_style = if self.assign_labels_panel.focus == AssignFocus::Collections
+        {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let collections_list = List::new(collection_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Collection", collections_title_style)),
+            )
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut collection_state = ListState::default();
+        if collection_max > 0 {
+            collection_state.select(Some(collection_cursor));
+        }
+        frame.render_stateful_widget(collections_list, body[0], &mut collection_state);
+
+        // Tags
+        let tags = self.assign_visible_tags();
+        let mut tag_cursor = self.assign_labels_panel.tag_cursor;
+        if !tags.is_empty() {
+            tag_cursor = tag_cursor.min(tags.len() - 1);
+        } else {
+            tag_cursor = 0;
+        }
+
+        let mut tag_items = Vec::new();
+        if tags.is_empty() {
+            tag_items.push(ListItem::new(Line::raw("(none)")));
+        } else {
+            for tag in &tags {
+                let selected = self
+                    .assign_labels_panel
+                    .staged
+                    .tags
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(tag));
+                let prefix = if selected { "[x]" } else { "[ ]" };
+                tag_items.push(ListItem::new(Line::raw(format!("{prefix} {tag}"))));
+            }
+        }
+
+        let tags_title_style = if self.assign_labels_panel.focus == AssignFocus::Tags {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let tags_list = List::new(tag_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Tags", tags_title_style)),
+            )
+            .highlight_style(highlight_style)
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut tag_state = ListState::default();
+        if !tags.is_empty() {
+            tag_state.select(Some(tag_cursor));
+        }
+        frame.render_stateful_widget(tags_list, body[1], &mut tag_state);
+
+        let footer_lines = vec![Line::from(vec![
+            Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" focus  "),
+            Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" filter  "),
+            Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" new  "),
+            Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" toggle  "),
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" apply  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel"),
+        ])];
+        let footer = Paragraph::new(Text::from(footer_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(footer, sections[2]);
+    }
+
+    fn draw_label_catalog_input_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
+        let popup_area = centered_rect(70, 35, area);
+        frame.render_widget(Clear, popup_area);
+
+        let title = match (
+            self.label_catalog_input_panel.mode,
+            self.label_catalog_input_panel.kind,
+        ) {
+            (LabelCatalogInputMode::Create, TagKind::Tag) => "New tag",
+            (LabelCatalogInputMode::Create, TagKind::Collection) => "New collection",
+            (LabelCatalogInputMode::Rename, TagKind::Tag) => "Rename tag",
+            (LabelCatalogInputMode::Rename, TagKind::Collection) => "Rename collection",
+        };
+
+        let block = Block::default().borders(Borders::ALL).title(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(block.clone(), popup_area);
+
+        let inner = block.inner(popup_area);
+        let sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(5),
+            ])
+            .split(inner);
+
+        let prompt = match self.label_catalog_input_panel.kind {
+            TagKind::Tag => "Tag: ",
+            TagKind::Collection => "Collection: ",
+        };
+        let header = Paragraph::new(Line::from(vec![
+            Span::styled(prompt, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(self.label_catalog_input_panel.input.clone()),
+        ]))
+        .wrap(Wrap { trim: true })
+        .alignment(Alignment::Left);
+        frame.render_widget(header, sections[0]);
+
+        let mut help_lines = Vec::new();
+        help_lines.push(Line::from(vec![
+            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" apply  "),
+            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" cancel  "),
+            Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" delete  "),
+            Span::styled("Ctrl+U", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" clear"),
+        ]));
+
+        if let Some(err) = &self.label_catalog_input_panel.error {
+            help_lines.push(Line::raw(""));
+            help_lines.push(Line::styled(
+                err.clone(),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        let help = Paragraph::new(Text::from(help_lines))
+            .wrap(Wrap { trim: true })
+            .alignment(Alignment::Left);
+        frame.render_widget(help, sections[2]);
     }
 
     fn draw_bookmarks_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -3560,6 +4865,119 @@ impl Default for SearchPanel {
             collection_cursor: 0,
             tag_cursor: 0,
             snapshot: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelManagerTab {
+    Collections,
+    Tags,
+}
+
+#[derive(Debug, Clone)]
+struct LabelManagerPanel {
+    open: bool,
+    tab: LabelManagerTab,
+    collections_cursor: usize,
+    tags_cursor: usize,
+    filter_editing: bool,
+    filter: String,
+    confirm_delete: Option<LabelDeleteTarget>,
+    error: Option<String>,
+}
+
+impl Default for LabelManagerPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            tab: LabelManagerTab::Collections,
+            collections_cursor: 0,
+            tags_cursor: 0,
+            filter_editing: false,
+            filter: String::new(),
+            confirm_delete: None,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LabelDeleteTarget {
+    kind: TagKind,
+    name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignFocus {
+    Collections,
+    Tags,
+}
+
+#[derive(Debug, Clone)]
+struct AssignLabelsPanel {
+    open: bool,
+    focus: AssignFocus,
+    collection_cursor: usize,
+    tag_cursor: usize,
+    collection_query: String,
+    tag_query: String,
+    query_editing: bool,
+    book_path: Option<String>,
+    staged: BookLabels,
+    error: Option<String>,
+}
+
+impl Default for AssignLabelsPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            focus: AssignFocus::Collections,
+            collection_cursor: 0,
+            tag_cursor: 0,
+            collection_query: String::new(),
+            tag_query: String::new(),
+            query_editing: false,
+            book_path: None,
+            staged: BookLabels::default(),
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelCatalogInputTarget {
+    Manager,
+    Assign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LabelCatalogInputMode {
+    Create,
+    Rename,
+}
+
+#[derive(Debug, Clone)]
+struct LabelCatalogInputPanel {
+    open: bool,
+    target: LabelCatalogInputTarget,
+    mode: LabelCatalogInputMode,
+    kind: TagKind,
+    from: Option<String>,
+    input: String,
+    error: Option<String>,
+}
+
+impl Default for LabelCatalogInputPanel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            target: LabelCatalogInputTarget::Manager,
+            mode: LabelCatalogInputMode::Create,
+            kind: TagKind::Tag,
+            from: None,
+            input: String::new(),
+            error: None,
         }
     }
 }

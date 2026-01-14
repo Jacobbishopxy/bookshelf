@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-use bookshelf_core::{Book, BookLabels, Bookmark, Note, Progress, Settings};
+use bookshelf_core::{Book, BookLabels, Bookmark, Note, Progress, Settings, TagKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagMatchMode {
@@ -48,6 +48,9 @@ pub struct AppContext {
     pub notes_by_path: HashMap<String, Vec<Note>>,
     pub dirty_favorite_paths: HashSet<String>,
     pub dirty_label_paths: HashSet<String>,
+    pub known_tags: Vec<String>,
+    pub known_collections: Vec<String>,
+    pub dirty_label_catalog_ops: Vec<LabelCatalogOp>,
     pub dirty_bookmark_paths: HashSet<String>,
     pub dirty_note_paths: HashSet<String>,
 }
@@ -71,6 +74,9 @@ impl AppContext {
             notes_by_path: HashMap::new(),
             dirty_favorite_paths: HashSet::new(),
             dirty_label_paths: HashSet::new(),
+            known_tags: Vec::new(),
+            known_collections: Vec::new(),
+            dirty_label_catalog_ops: Vec::new(),
             dirty_bookmark_paths: HashSet::new(),
             dirty_note_paths: HashSet::new(),
         }
@@ -93,6 +99,47 @@ impl AppContext {
         self
     }
 
+    pub fn with_label_catalog(mut self, tags: Vec<String>, collections: Vec<String>) -> Self {
+        self.known_tags = tags;
+        self.known_collections = collections;
+        self.normalize_label_catalog();
+        self
+    }
+
+    pub fn normalize_label_catalog(&mut self) {
+        normalize_label_names(&mut self.known_tags);
+        normalize_label_names(&mut self.known_collections);
+    }
+
+    pub fn ensure_known_labels(&mut self, labels: &BookLabels) {
+        let mut changed = false;
+        for tag in &labels.tags {
+            let name = tag.trim();
+            if name.is_empty() {
+                continue;
+            }
+            if !self.known_tags.iter().any(|t| t.eq_ignore_ascii_case(name)) {
+                self.known_tags.push(name.to_string());
+                changed = true;
+            }
+        }
+        if let Some(collection) = labels.collection.as_deref() {
+            let name = collection.trim();
+            if !name.is_empty()
+                && !self
+                    .known_collections
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(name))
+            {
+                self.known_collections.push(name.to_string());
+                changed = true;
+            }
+        }
+        if changed {
+            self.normalize_label_catalog();
+        }
+    }
+
     pub fn with_bookmarks(mut self, bookmarks_by_path: HashMap<String, Vec<Bookmark>>) -> Self {
         self.bookmarks_by_path = bookmarks_by_path;
         self
@@ -102,6 +149,33 @@ impl AppContext {
         self.notes_by_path = notes_by_path;
         self
     }
+}
+
+fn normalize_label_names(values: &mut Vec<String>) {
+    values.retain(|t| !t.trim().is_empty());
+    values.sort_by(|a, b| {
+        a.to_ascii_lowercase()
+            .cmp(&b.to_ascii_lowercase())
+            .then_with(|| a.cmp(b))
+    });
+    values.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelCatalogOp {
+    Create {
+        kind: TagKind,
+        name: String,
+    },
+    Rename {
+        kind: TagKind,
+        from: String,
+        to: String,
+    },
+    Delete {
+        kind: TagKind,
+        name: String,
+    },
 }
 
 #[derive(Debug, Default)]
