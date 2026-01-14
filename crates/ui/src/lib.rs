@@ -24,7 +24,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Tabs, Wrap,
+    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui_image::picker::{Picker, cap_parser::QueryStdioOptions};
 use ratatui_image::protocol::Protocol as ImageProtocol;
@@ -52,7 +52,6 @@ pub struct Ui {
     settings_panel: SettingsPanel,
     scan_panel: ScanPathPanel,
     search_panel: SearchPanel,
-    label_input_panel: LabelInputPanel,
     label_manager_panel: LabelManagerPanel,
     assign_labels_panel: AssignLabelsPanel,
     label_catalog_input_panel: LabelCatalogInputPanel,
@@ -75,7 +74,6 @@ impl Ui {
         let settings_panel = SettingsPanel::default();
         let scan_panel = ScanPathPanel::new(join_roots(&ctx.settings));
         let search_panel = SearchPanel::default();
-        let label_input_panel = LabelInputPanel::default();
         let label_manager_panel = LabelManagerPanel::default();
         let assign_labels_panel = AssignLabelsPanel::default();
         let label_catalog_input_panel = LabelCatalogInputPanel::default();
@@ -91,7 +89,6 @@ impl Ui {
             settings_panel,
             scan_panel,
             search_panel,
-            label_input_panel,
             label_manager_panel,
             assign_labels_panel,
             label_catalog_input_panel,
@@ -318,13 +315,6 @@ impl Ui {
                                 exit,
                             });
                         }
-                    } else if self.label_input_panel.open {
-                        if let Some(exit) = self.handle_label_input_panel_key(key)? {
-                            return Ok(UiOutcome {
-                                ctx: self.ctx.clone(),
-                                exit,
-                            });
-                        }
                     } else if let Some(exit) = self.handle_main_key(key)? {
                         return Ok(UiOutcome {
                             ctx: self.ctx.clone(),
@@ -347,29 +337,15 @@ impl Ui {
                 Ok(Some(UiExit::Quit))
             }
             KeyCode::Char('/') => {
-                self.open_search_panel();
-                Ok(None)
-            }
-            KeyCode::Char('f') => {
-                if let Some(idx) = self.selected_visible_index()
-                    && let Some(book) = self.ctx.books.get_mut(idx)
-                {
-                    book.favorite = !book.favorite;
-                    self.ctx.dirty_favorite_paths.insert(book.path.clone());
-                    self.normalize_selection_to_visible();
-                }
-                Ok(None)
-            }
-            KeyCode::Char('t') => {
-                self.open_label_input_panel(LabelInputMode::Tag);
-                Ok(None)
-            }
-            KeyCode::Char('c') => {
-                self.open_label_input_panel(LabelInputMode::Collection);
+                self.open_filters_panel();
                 Ok(None)
             }
             KeyCode::Char('l') => {
-                self.open_search_panel_with_focus(SearchFocus::Collections);
+                self.open_labels_panel();
+                Ok(None)
+            }
+            KeyCode::Char('c') => {
+                self.open_catalog_panel();
                 Ok(None)
             }
             KeyCode::Char('s') => {
@@ -399,17 +375,26 @@ impl Ui {
                 self.select_prev_visible();
                 Ok(None)
             }
-            KeyCode::Left | KeyCode::Right => {
-                self.ctx.favorites_only = !self.ctx.favorites_only;
-                self.normalize_selection_to_visible();
-                Ok(None)
-            }
             _ => Ok(None),
         }
     }
 
-    fn open_search_panel(&mut self) {
+    fn open_filters_panel(&mut self) {
+        self.open_search_panel_mode(SearchPanelMode::Filters);
+        self.search_panel.focus = SearchFocus::Query;
+    }
+
+    fn open_labels_panel(&mut self) {
+        self.open_search_panel_mode(SearchPanelMode::Labels);
+    }
+
+    fn open_catalog_panel(&mut self) {
+        self.open_search_panel_mode(SearchPanelMode::Catalog);
+    }
+
+    fn open_search_panel_mode(&mut self, mode: SearchPanelMode) {
         self.search_panel.open = true;
+        self.search_panel.mode = mode;
         self.search_panel.tab = SearchTab::Search;
         self.search_panel.focus = SearchFocus::Query;
         self.search_panel.collection_cursor = 0;
@@ -427,10 +412,10 @@ impl Ui {
                 .get(self.ctx.selected)
                 .map(|b| b.path.clone()),
         });
-        self.label_input_panel.open = false;
         self.label_catalog_input_panel.open = false;
         self.settings_panel.open = false;
         self.scan_panel.open = false;
+        self.sync_search_panel_tab();
         self.normalize_selection_to_visible();
     }
 
@@ -469,33 +454,6 @@ impl Ui {
     }
 
     fn handle_search_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
-        match key.code {
-            KeyCode::Char('1') => {
-                self.set_search_panel_tab(SearchTab::Search);
-                self.search_panel.focus = SearchFocus::Query;
-                return Ok(None);
-            }
-            KeyCode::Char('2') => {
-                self.set_search_panel_tab(SearchTab::Assign);
-                return Ok(None);
-            }
-            KeyCode::Char('3') => {
-                self.set_search_panel_tab(SearchTab::Manage);
-                return Ok(None);
-            }
-            KeyCode::Char('[') => {
-                let tab = self.search_panel.tab.prev();
-                self.set_search_panel_tab(tab);
-                return Ok(None);
-            }
-            KeyCode::Char(']') => {
-                let tab = self.search_panel.tab.next();
-                self.set_search_panel_tab(tab);
-                return Ok(None);
-            }
-            _ => {}
-        }
-
         if key.code == KeyCode::Esc {
             if self.search_panel.tab == SearchTab::Assign && self.assign_labels_panel.query_editing
             {
@@ -1584,38 +1542,19 @@ impl Ui {
         }
     }
 
-    fn open_label_input_panel(&mut self, mode: LabelInputMode) {
-        self.label_input_panel.open = true;
-        self.label_input_panel.mode = mode;
-        self.label_input_panel.error = None;
-        self.label_input_panel.input.clear();
-
-        if mode == LabelInputMode::Collection
-            && let Some(path) = self.selected_book_path()
-            && let Some(labels) = self.ctx.labels_by_path.get(&path)
-            && let Some(collection) = labels.collection.as_deref()
-        {
-            self.label_input_panel.input = collection.to_string();
-        }
-
-        self.search_panel.open = false;
-        self.settings_panel.open = false;
-        self.scan_panel.open = false;
-        self.label_catalog_input_panel.open = false;
-    }
-
     fn selected_book_path(&self) -> Option<String> {
         self.selected_visible_index()
             .and_then(|idx| self.ctx.books.get(idx))
             .map(|b| b.path.clone())
     }
 
-    fn open_search_panel_with_focus(&mut self, focus: SearchFocus) {
-        self.open_search_panel();
-        self.search_panel.focus = focus;
-    }
+    fn sync_search_panel_tab(&mut self) {
+        let tab = match self.search_panel.mode {
+            SearchPanelMode::Filters => SearchTab::Search,
+            SearchPanelMode::Labels => SearchTab::Assign,
+            SearchPanelMode::Catalog => SearchTab::Manage,
+        };
 
-    fn set_search_panel_tab(&mut self, tab: SearchTab) {
         if self.search_panel.tab != tab {
             self.label_manager_panel.confirm_delete = None;
             self.label_manager_panel.error = None;
@@ -1666,121 +1605,20 @@ impl Ui {
 
     fn open_label_catalog_input_panel(
         &mut self,
-        target: LabelCatalogInputTarget,
         mode: LabelCatalogInputMode,
         kind: TagKind,
         from: Option<String>,
         prefill: String,
     ) {
         self.label_catalog_input_panel.open = true;
-        self.label_catalog_input_panel.target = target;
         self.label_catalog_input_panel.mode = mode;
         self.label_catalog_input_panel.kind = kind;
         self.label_catalog_input_panel.from = from;
         self.label_catalog_input_panel.input = prefill;
         self.label_catalog_input_panel.error = None;
-
-        self.label_input_panel.open = false;
         self.settings_panel.open = false;
         self.scan_panel.open = false;
         self.normalize_selection_to_visible();
-    }
-
-    fn handle_label_input_panel_key(&mut self, key: KeyEvent) -> anyhow::Result<Option<UiExit>> {
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && let KeyCode::Char('u') = key.code
-        {
-            self.label_input_panel.input.clear();
-            return Ok(None);
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.label_input_panel.open = false;
-                self.label_input_panel.error = None;
-                self.label_input_panel.input.clear();
-                Ok(None)
-            }
-            KeyCode::Enter => {
-                let Some(path) = self.selected_book_path() else {
-                    self.label_input_panel.error = Some("No selection".to_string());
-                    return Ok(None);
-                };
-
-                let input = self.label_input_panel.input.trim();
-                if input.is_empty() {
-                    self.label_input_panel.error = Some(match self.label_input_panel.mode {
-                        LabelInputMode::Tag => "Enter a tag name".to_string(),
-                        LabelInputMode::Collection => {
-                            "Enter a collection name (or '-' to clear)".to_string()
-                        }
-                    });
-                    return Ok(None);
-                }
-
-                let mut labels = self
-                    .ctx
-                    .labels_by_path
-                    .get(&path)
-                    .cloned()
-                    .unwrap_or_default();
-
-                match self.label_input_panel.mode {
-                    LabelInputMode::Tag => {
-                        let parts = input.split(',').map(str::trim).filter(|s| !s.is_empty());
-                        let mut changed = false;
-                        for tag in parts {
-                            if let Some(pos) =
-                                labels.tags.iter().position(|t| t.eq_ignore_ascii_case(tag))
-                            {
-                                labels.tags.remove(pos);
-                                changed = true;
-                            } else {
-                                labels.tags.push(tag.to_string());
-                                changed = true;
-                            }
-                        }
-                        if !changed {
-                            self.label_input_panel.error = Some("Enter a tag name".to_string());
-                            return Ok(None);
-                        }
-                    }
-                    LabelInputMode::Collection => {
-                        let lower = input.to_ascii_lowercase();
-                        if lower == "-" || lower == "none" || lower == "clear" {
-                            labels.collection = None;
-                        } else {
-                            labels.collection = Some(input.to_string());
-                        }
-                    }
-                }
-
-                labels.normalize();
-                self.ctx.ensure_known_labels(&labels);
-                if labels.tags.is_empty() && labels.collection.is_none() {
-                    self.ctx.labels_by_path.remove(&path);
-                } else {
-                    self.ctx.labels_by_path.insert(path.clone(), labels);
-                }
-                self.ctx.dirty_label_paths.insert(path);
-
-                self.label_input_panel.open = false;
-                self.label_input_panel.error = None;
-                self.label_input_panel.input.clear();
-                Ok(None)
-            }
-            KeyCode::Backspace => {
-                self.label_input_panel.input.pop();
-                Ok(None)
-            }
-            KeyCode::Char(ch) => {
-                if !ch.is_control() {
-                    self.label_input_panel.input.push(ch);
-                }
-                Ok(None)
-            }
-            _ => Ok(None),
-        }
     }
 
     fn label_manager_entries(&self, tab: LabelManagerTab) -> Vec<(String, usize)> {
@@ -1956,7 +1794,6 @@ impl Ui {
                 };
                 let prefill = self.label_manager_panel.filter.clone();
                 self.open_label_catalog_input_panel(
-                    LabelCatalogInputTarget::Manager,
                     LabelCatalogInputMode::Create,
                     kind,
                     None,
@@ -1970,7 +1807,6 @@ impl Ui {
                     return Ok(None);
                 };
                 self.open_label_catalog_input_panel(
-                    LabelCatalogInputTarget::Manager,
                     LabelCatalogInputMode::Rename,
                     target.kind,
                     Some(target.name.clone()),
@@ -2210,23 +2046,6 @@ impl Ui {
                 }
                 Ok(None)
             }
-            KeyCode::Char('n') => {
-                let (kind, prefill) = match self.assign_labels_panel.focus {
-                    AssignFocus::Collections => (
-                        TagKind::Collection,
-                        self.assign_labels_panel.collection_query.clone(),
-                    ),
-                    AssignFocus::Tags => (TagKind::Tag, self.assign_labels_panel.tag_query.clone()),
-                };
-                self.open_label_catalog_input_panel(
-                    LabelCatalogInputTarget::Assign,
-                    LabelCatalogInputMode::Create,
-                    kind,
-                    None,
-                    prefill,
-                );
-                Ok(None)
-            }
             _ => Ok(None),
         }
     }
@@ -2459,27 +2278,6 @@ impl Ui {
                                 kind: self.label_catalog_input_panel.kind,
                                 name: name.clone(),
                             });
-
-                        if self.label_catalog_input_panel.target == LabelCatalogInputTarget::Assign
-                        {
-                            match self.label_catalog_input_panel.kind {
-                                TagKind::Tag => {
-                                    if !self
-                                        .assign_labels_panel
-                                        .staged
-                                        .tags
-                                        .iter()
-                                        .any(|t| t.eq_ignore_ascii_case(&name))
-                                    {
-                                        self.assign_labels_panel.staged.tags.push(name.clone());
-                                        self.assign_labels_panel.staged.normalize();
-                                    }
-                                }
-                                TagKind::Collection => {
-                                    self.assign_labels_panel.staged.collection = Some(name.clone());
-                                }
-                            }
-                        }
                     }
                     LabelCatalogInputMode::Rename => {
                         let Some(from) = self.label_catalog_input_panel.from.clone() else {
@@ -2651,32 +2449,21 @@ impl Ui {
         }
     }
 
-    fn main_footer_spans(&self) -> Vec<Span<'static>> {
-        let query = self.ctx.library_query.trim();
+    fn main_footer_lines(&self) -> Vec<Line<'static>> {
+        if self.label_catalog_input_panel.open {
+            return vec![Line::from(vec![
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" apply  "),
+                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" delete  "),
+                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear"),
+            ])];
+        }
 
-        let mut spans = if self.label_catalog_input_panel.open {
-            vec![
-                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cancel  "),
-                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" apply  "),
-                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" delete  "),
-                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" clear"),
-            ]
-        } else if self.label_input_panel.open {
-            vec![
-                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cancel  "),
-                Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" apply  "),
-                Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" delete  "),
-                Span::styled("Ctrl+u", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" clear"),
-            ]
-        } else if self.search_panel.open {
+        if self.search_panel.open {
             let enter_action = match self.search_panel.tab {
                 SearchTab::Search => "close",
                 SearchTab::Assign => {
@@ -2696,65 +2483,83 @@ impl Ui {
                     }
                 }
             };
-            vec![
+
+            return vec![Line::from(vec![
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel  "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(" {enter_action}  ")),
-                Span::styled("1/2/3", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" tabs  "),
-                Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cycle"),
-            ]
-        } else {
-            vec![
+                Span::raw(format!(" {enter_action}")),
+            ])];
+        }
+
+        vec![
+            Line::from(vec![
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" quit  "),
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" move  "),
-                Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" search  "),
-                Span::styled("l", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" labels  "),
-                Span::styled("←/→", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" fav filter  "),
-                Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" favorite  "),
-                Span::styled("t", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" tags  "),
-                Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" collection  "),
-                Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" settings  "),
                 Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" read"),
-            ]
-        };
+            ]),
+            Line::from(vec![
+                Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" filters  "),
+                Span::styled("l", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" labels  "),
+                Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" catalog  "),
+                Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" settings"),
+            ]),
+        ]
+    }
 
-        if !query.is_empty() && !self.search_panel.open {
-            spans.push(Span::raw("  |  "));
-            spans.push(Span::styled(
-                format!("filter: {query}"),
-                Style::default().fg(Color::Cyan),
-            ));
+    fn main_header_lines(&self) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(vec![
+            Span::styled("Bookshelf", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" — library"),
+        ])];
+
+        if let Some(status_line) = self.active_filter_status_line() {
+            lines.push(status_line);
         }
 
-        if self.ctx.favorites_only && !self.search_panel.open {
-            spans.push(Span::raw("  |  "));
-            spans.push(Span::styled(
-                "favorites only".to_string(),
-                Style::default().fg(Color::Cyan),
-            ));
+        lines
+    }
+
+    fn active_filter_status_line(&self) -> Option<Line<'static>> {
+        if self.search_panel.open {
+            return None;
+        }
+
+        let mut parts: Vec<Span<'static>> = Vec::new();
+        let style = Style::default().fg(Color::Cyan);
+
+        let query = self.ctx.library_query.trim();
+        if !query.is_empty() {
+            parts.push(Span::styled(format!("filter: {query}"), style));
+        }
+
+        if self.ctx.favorites_only {
+            parts.push(Span::styled("favorites only".to_string(), style));
         }
 
         if let Some(label) = self.active_label_filter_summary() {
-            if !self.search_panel.open {
-                spans.push(Span::raw("  |  "));
-                spans.push(Span::styled(label, Style::default().fg(Color::Cyan)));
-            }
+            parts.push(Span::styled(label, style));
         }
 
-        spans
+        if parts.is_empty() {
+            None
+        } else {
+            let mut spans = Vec::with_capacity(parts.len() * 2 - 1);
+            for (idx, part) in parts.into_iter().enumerate() {
+                if idx > 0 {
+                    spans.push(Span::raw("  |  "));
+                }
+                spans.push(part);
+            }
+            Some(Line::from(spans))
+        }
     }
 
     fn active_label_filter_summary(&self) -> Option<String> {
@@ -2846,12 +2651,9 @@ impl Ui {
             ])
             .split(area);
 
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled("Bookshelf", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" — library"),
-        ]))
-        .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::BOTTOM));
+        let title = Paragraph::new(Text::from(self.main_header_lines()))
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(title, layout[0]);
 
         let body_layout = Layout::default()
@@ -2862,7 +2664,7 @@ impl Ui {
         self.draw_library(frame, body_layout[0]);
         frame.render_widget(self.draw_details(body_layout[1]), body_layout[1]);
 
-        let footer = Paragraph::new(Line::from(self.main_footer_spans()))
+        let footer = Paragraph::new(Text::from(self.main_footer_lines()))
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::TOP));
         frame.render_widget(footer, layout[2]);
@@ -2879,10 +2681,6 @@ impl Ui {
             self.draw_search_panel(area, frame);
         }
 
-        if self.label_input_panel.open {
-            self.draw_label_input_panel(area, frame);
-        }
-
         if self.label_catalog_input_panel.open {
             self.draw_label_catalog_input_panel(area, frame);
         }
@@ -2892,8 +2690,11 @@ impl Ui {
         let popup_area = centered_rect(90, 78, area);
         frame.render_widget(Clear, popup_area);
 
-        let visible = self.visible_indices();
-        let title = format!("Search — {}/{}", visible.len(), self.ctx.books.len());
+        let title = match self.search_panel.mode {
+            SearchPanelMode::Filters => "Filters".to_string(),
+            SearchPanelMode::Labels => "Labels".to_string(),
+            SearchPanelMode::Catalog => "Catalog".to_string(),
+        };
 
         let block = Block::default().borders(Borders::ALL).title(Span::styled(
             title,
@@ -2902,31 +2703,12 @@ impl Ui {
         frame.render_widget(block.clone(), popup_area);
 
         let inner = block.inner(popup_area);
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0)])
-            .split(inner);
-
-        let tab_titles = vec![
-            Line::from("Search"),
-            Line::from("Assign"),
-            Line::from("Manage"),
-        ];
-        let tabs = Tabs::new(tab_titles)
-            .select(self.search_panel.tab.index())
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .divider(Span::raw(" | "))
-            .block(Block::default().borders(Borders::BOTTOM));
-        frame.render_widget(tabs, sections[0]);
-
-        match self.search_panel.tab {
-            SearchTab::Search => self.draw_search_filters_tab(sections[1], frame),
-            SearchTab::Assign => self.draw_search_assign_tab(sections[1], frame),
-            SearchTab::Manage => self.draw_search_manage_tab(sections[1], frame),
+        match self.search_panel.mode {
+            SearchPanelMode::Filters => {
+                self.draw_search_filters_tab(inner, frame);
+            }
+            SearchPanelMode::Labels => self.draw_search_assign_tab(inner, frame),
+            SearchPanelMode::Catalog => self.draw_search_manage_tab(inner, frame),
         }
     }
 
@@ -2940,15 +2722,7 @@ impl Ui {
             ])
             .split(area);
 
-        let query_style = if self.search_panel.focus == SearchFocus::Query {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-
-        let filters_lines = self.search_panel_summary_lines(query_style);
+        let filters_lines = self.search_panel_summary_lines(self.search_panel.focus);
         let header = Paragraph::new(Text::from(filters_lines))
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
@@ -2964,10 +2738,6 @@ impl Ui {
 
         let help_lines = vec![
             Line::from(vec![
-                Span::styled("1/2/3", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" tabs  "),
-                Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cycle  "),
                 Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" focus  "),
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
@@ -2996,7 +2766,45 @@ impl Ui {
         frame.render_widget(help, sections[2]);
     }
 
-    fn search_panel_summary_lines(&self, query_style: Style) -> Vec<Line<'static>> {
+    fn search_panel_summary_lines(&self, focus: SearchFocus) -> Vec<Line<'static>> {
+        let base_label_style = Style::default().add_modifier(Modifier::BOLD);
+        let focus_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+
+        let query_label_style = if focus == SearchFocus::Query {
+            focus_style
+        } else {
+            base_label_style
+        };
+        let query_value_style = if focus == SearchFocus::Query {
+            focus_style
+        } else {
+            Style::default()
+        };
+
+        let collection_label_style = if focus == SearchFocus::Collections {
+            focus_style
+        } else {
+            base_label_style
+        };
+        let collection_value_style = if focus == SearchFocus::Collections {
+            focus_style
+        } else {
+            Style::default()
+        };
+
+        let tags_label_style = if focus == SearchFocus::Tags {
+            focus_style
+        } else {
+            base_label_style
+        };
+        let tags_value_style = if focus == SearchFocus::Tags {
+            focus_style
+        } else {
+            Style::default()
+        };
+
         let query = self.ctx.library_query.clone();
         let fav = if self.ctx.favorites_only { "on" } else { "off" };
         let collection = match &self.ctx.collection_filter {
@@ -3016,29 +2824,23 @@ impl Ui {
 
         vec![
             Line::from(vec![
-                Span::styled("Query: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(query, query_style),
+                Span::styled("Query: ", query_label_style),
+                Span::styled(query, query_value_style),
             ]),
             Line::from(vec![
-                Span::styled(
-                    "Favorites only: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled("Favorites only: ", base_label_style),
                 Span::raw(fav),
                 Span::raw("  "),
-                Span::styled(
-                    "Collection: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(collection),
+                Span::styled("Collection: ", collection_label_style),
+                Span::styled(collection, collection_value_style),
             ]),
             Line::from(vec![
-                Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(tags),
+                Span::styled("Tags: ", tags_label_style),
+                Span::styled(tags, tags_value_style),
             ]),
             Line::from(vec![
-                Span::styled("Tag match: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(mode),
+                Span::styled("Tag match: ", tags_label_style),
+                Span::styled(mode, tags_value_style),
             ]),
         ]
     }
@@ -3053,10 +2855,12 @@ impl Ui {
         }
 
         let focus = self.search_panel.focus == SearchFocus::Collections;
-        let title = if focus {
-            "Collections *"
+        let title_style = if focus {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
-            "Collections"
+            Style::default()
         };
 
         let items: Vec<ListItem> = if entries.is_empty() {
@@ -3082,7 +2886,11 @@ impl Ui {
         };
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Collections", title_style)),
+            )
             .highlight_style(highlight_style)
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
@@ -3107,11 +2915,14 @@ impl Ui {
             TagMatchMode::And => "AND",
             TagMatchMode::Or => "OR",
         };
-        let title = if focus {
-            format!("Tags ({mode}) *")
+        let title_style = if focus {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
-            format!("Tags ({mode})")
+            Style::default()
         };
+        let title = format!("Tags ({mode})");
 
         let items: Vec<ListItem> = if entries.is_empty() {
             vec![ListItem::new(Line::raw("(none)"))]
@@ -3140,7 +2951,11 @@ impl Ui {
         };
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled(title, title_style)),
+            )
             .highlight_style(highlight_style)
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
@@ -3149,105 +2964,6 @@ impl Ui {
             state.select(Some(cursor));
         }
         frame.render_stateful_widget(list, area, &mut state);
-    }
-
-    fn draw_label_input_panel(&self, area: Rect, frame: &mut ratatui::Frame) {
-        let popup_area = centered_rect(70, 38, area);
-        frame.render_widget(Clear, popup_area);
-
-        let title = match self.label_input_panel.mode {
-            LabelInputMode::Tag => "Tags",
-            LabelInputMode::Collection => "Collection",
-        };
-        let block = Block::default().borders(Borders::ALL).title(Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
-        frame.render_widget(block.clone(), popup_area);
-
-        let inner = block.inner(popup_area);
-        let mut lines = Vec::new();
-
-        let selected = self
-            .selected_visible_index()
-            .and_then(|idx| self.ctx.books.get(idx));
-        if let Some(book) = selected {
-            let labels = self
-                .ctx
-                .labels_by_path
-                .get(&book.path)
-                .cloned()
-                .unwrap_or_default();
-            let tags = if labels.tags.is_empty() {
-                "(none)".to_string()
-            } else {
-                labels.tags.join(", ")
-            };
-            let collection = labels.collection.unwrap_or_else(|| "-".to_string());
-            lines.push(Line::from(vec![
-                Span::styled("Selected: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(book.title.clone()),
-            ]));
-            lines.push(Line::raw(""));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    "Collection: ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(collection),
-            ]));
-            lines.push(Line::from(vec![
-                Span::styled("Tags: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(tags),
-            ]));
-            lines.push(Line::raw(""));
-        } else {
-            lines.push(Line::styled(
-                "No selection.",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-            lines.push(Line::raw(""));
-        }
-
-        let label = match self.label_input_panel.mode {
-            LabelInputMode::Tag => "Tag name",
-            LabelInputMode::Collection => "Collection name",
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{label}: "),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(self.label_input_panel.input.clone()),
-        ]));
-        lines.push(Line::raw(""));
-
-        match self.label_input_panel.mode {
-            LabelInputMode::Tag => {
-                lines.push(Line::raw("Enter toggles the tag on the selected book."));
-                lines.push(Line::raw("Comma-separated names toggle multiple tags."));
-            }
-            LabelInputMode::Collection => {
-                lines.push(Line::raw(
-                    "Enter sets the collection for the selected book.",
-                ));
-                lines.push(Line::raw("Type '-' (or 'none') to clear the collection."));
-            }
-        }
-        lines.push(Line::raw("Esc cancels, Backspace deletes, Ctrl+u clears."));
-
-        if let Some(err) = &self.label_input_panel.error {
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                err.clone(),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        let paragraph = Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: true })
-            .alignment(Alignment::Left);
-        frame.render_widget(paragraph, inner);
     }
 
     fn draw_search_manage_tab(&self, area: Rect, frame: &mut ratatui::Frame) {
@@ -3304,41 +3020,105 @@ impl Ui {
             .alignment(Alignment::Left);
         frame.render_widget(header, sections[0]);
 
-        let entries = self.label_manager_entries(self.label_manager_panel.tab);
-        let mut cursor = match self.label_manager_panel.tab {
-            LabelManagerTab::Collections => self.label_manager_panel.collections_cursor,
-            LabelManagerTab::Tags => self.label_manager_panel.tags_cursor,
-        };
-        if !entries.is_empty() {
-            cursor = cursor.min(entries.len() - 1);
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(sections[1]);
+
+        let collections_entries = self.label_manager_entries(LabelManagerTab::Collections);
+        let tags_entries = self.label_manager_entries(LabelManagerTab::Tags);
+
+        let mut collections_cursor = self.label_manager_panel.collections_cursor;
+        if !collections_entries.is_empty() {
+            collections_cursor = collections_cursor.min(collections_entries.len() - 1);
         } else {
-            cursor = 0;
+            collections_cursor = 0;
         }
 
-        let items: Vec<ListItem> = if entries.is_empty() {
+        let mut tags_cursor = self.label_manager_panel.tags_cursor;
+        if !tags_entries.is_empty() {
+            tags_cursor = tags_cursor.min(tags_entries.len() - 1);
+        } else {
+            tags_cursor = 0;
+        }
+
+        let focused_list_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let unfocused_list_style = Style::default().fg(Color::Gray);
+
+        // Collections
+        let collections_focus = self.label_manager_panel.tab == LabelManagerTab::Collections;
+        let collections_title_style = if collections_focus {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default()
+        };
+        let collections_items: Vec<ListItem> = if collections_entries.is_empty() {
             vec![ListItem::new(Line::raw("(none)"))]
         } else {
-            entries
+            collections_entries
                 .iter()
                 .map(|(name, count)| ListItem::new(Line::raw(format!("{name} ({count})"))))
                 .collect()
         };
-
-        let highlight_style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title("Labels"))
-            .highlight_style(highlight_style)
+        let collections_list = List::new(collections_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Collections", collections_title_style)),
+            )
+            .highlight_style(if collections_focus {
+                focused_list_style
+            } else {
+                unfocused_list_style
+            })
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
-        let mut state = ListState::default();
-        if !entries.is_empty() {
-            state.select(Some(cursor));
+        let mut collections_state = ListState::default();
+        if !collections_entries.is_empty() {
+            collections_state.select(Some(collections_cursor));
         }
-        frame.render_stateful_widget(list, sections[1], &mut state);
+        frame.render_stateful_widget(collections_list, body[0], &mut collections_state);
+
+        // Tags
+        let tags_focus = self.label_manager_panel.tab == LabelManagerTab::Tags;
+        let tags_title_style = if tags_focus {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default()
+        };
+        let tags_items: Vec<ListItem> = if tags_entries.is_empty() {
+            vec![ListItem::new(Line::raw("(none)"))]
+        } else {
+            tags_entries
+                .iter()
+                .map(|(name, count)| ListItem::new(Line::raw(format!("{name} ({count})"))))
+                .collect()
+        };
+        let tags_list = List::new(tags_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(Span::styled("Tags", tags_title_style)),
+            )
+            .highlight_style(if tags_focus {
+                focused_list_style
+            } else {
+                unfocused_list_style
+            })
+            .highlight_symbol("> ")
+            .highlight_spacing(HighlightSpacing::Always);
+        let mut tags_state = ListState::default();
+        if !tags_entries.is_empty() {
+            tags_state.select(Some(tags_cursor));
+        }
+        frame.render_stateful_widget(tags_list, body[1], &mut tags_state);
 
         let enter_action = if self.label_manager_panel.confirm_delete.is_some() {
             "delete"
@@ -3350,12 +3130,8 @@ impl Ui {
 
         let mut footer_lines = Vec::new();
         footer_lines.push(Line::from(vec![
-            Span::styled("1/2/3", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" tabs  "),
-            Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" cycle  "),
             Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(" switch kind  "),
+            Span::raw(" switch panel  "),
             Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" filter"),
         ]));
@@ -3465,7 +3241,7 @@ impl Ui {
         frame.render_widget(header, sections[0]);
 
         let body = Layout::default()
-            .direction(Direction::Vertical)
+            .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(sections[1]);
 
@@ -3579,10 +3355,6 @@ impl Ui {
 
         let footer_lines = vec![
             Line::from(vec![
-                Span::styled("1/2/3", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" tabs  "),
-                Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cycle  "),
                 Span::styled("Tab", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" focus  "),
                 Span::styled("↑/↓", Style::default().add_modifier(Modifier::BOLD)),
@@ -3591,8 +3363,6 @@ impl Ui {
             Line::from(vec![
                 Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" filter  "),
-                Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" new  "),
                 Span::styled("f", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" favorite  "),
                 Span::styled("Space", Style::default().add_modifier(Modifier::BOLD)),
@@ -4618,41 +4388,23 @@ const SETTINGS_MENU_KITTY_IMAGE_QUALITY: usize = 1;
 const SETTINGS_MENU_ITEM_COUNT: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchPanelMode {
+    Filters,
+    Labels,
+    Catalog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchTab {
     Search,
     Assign,
     Manage,
 }
 
-impl SearchTab {
-    fn next(self) -> Self {
-        match self {
-            SearchTab::Search => SearchTab::Assign,
-            SearchTab::Assign => SearchTab::Manage,
-            SearchTab::Manage => SearchTab::Search,
-        }
-    }
-
-    fn prev(self) -> Self {
-        match self {
-            SearchTab::Search => SearchTab::Manage,
-            SearchTab::Assign => SearchTab::Search,
-            SearchTab::Manage => SearchTab::Assign,
-        }
-    }
-
-    fn index(self) -> usize {
-        match self {
-            SearchTab::Search => 0,
-            SearchTab::Assign => 1,
-            SearchTab::Manage => 2,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct SearchPanel {
     open: bool,
+    mode: SearchPanelMode,
     tab: SearchTab,
     focus: SearchFocus,
     collection_cursor: usize,
@@ -4699,6 +4451,7 @@ impl Default for SearchPanel {
     fn default() -> Self {
         Self {
             open: false,
+            mode: SearchPanelMode::Filters,
             tab: SearchTab::Search,
             focus: SearchFocus::Query,
             collection_cursor: 0,
@@ -4783,12 +4536,6 @@ impl Default for AssignLabelsPanel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LabelCatalogInputTarget {
-    Manager,
-    Assign,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LabelCatalogInputMode {
     Create,
     Rename,
@@ -4797,7 +4544,6 @@ enum LabelCatalogInputMode {
 #[derive(Debug, Clone)]
 struct LabelCatalogInputPanel {
     open: bool,
-    target: LabelCatalogInputTarget,
     mode: LabelCatalogInputMode,
     kind: TagKind,
     from: Option<String>,
@@ -4809,7 +4555,6 @@ impl Default for LabelCatalogInputPanel {
     fn default() -> Self {
         Self {
             open: false,
-            target: LabelCatalogInputTarget::Manager,
             mode: LabelCatalogInputMode::Create,
             kind: TagKind::Tag,
             from: None,
@@ -4817,12 +4562,6 @@ impl Default for LabelCatalogInputPanel {
             error: None,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LabelInputMode {
-    Tag,
-    Collection,
 }
 
 #[derive(Debug, Clone)]
@@ -4836,25 +4575,6 @@ struct CollectionEntry {
 struct TagEntry {
     name: String,
     count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct LabelInputPanel {
-    open: bool,
-    mode: LabelInputMode,
-    input: String,
-    error: Option<String>,
-}
-
-impl Default for LabelInputPanel {
-    fn default() -> Self {
-        Self {
-            open: false,
-            mode: LabelInputMode::Tag,
-            input: String::new(),
-            error: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default)]

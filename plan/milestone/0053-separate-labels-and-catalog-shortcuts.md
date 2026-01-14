@@ -1,0 +1,5 @@
+- [x] Split overlay modes: Filters/Labels/Catalog
+- [x] Bind `/` to Filters
+- [x] Bind `l` to Labels (assign)
+- [x] Bind `c` to Catalog (manage)
+- [x] Remove tab UI and hints

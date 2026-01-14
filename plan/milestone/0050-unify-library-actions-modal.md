@@ -1,0 +1,4 @@
+- [x] Remove per-action main keys (fav/favorite/tags/collection)
+- [x] Open tabbed modal from single key
+- [x] Shorten main footer text
+- [x] Run `cargo fmt` + UI tests

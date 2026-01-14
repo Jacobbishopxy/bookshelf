@@ -1,0 +1,3 @@
+- [x] Move filter state out of footer
+- [x] Show active filter state in header
+- [x] Keep `cargo fmt` clean

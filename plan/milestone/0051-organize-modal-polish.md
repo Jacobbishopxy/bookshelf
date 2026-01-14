@@ -1,0 +1,4 @@
+- [x] Remove `[/] cycle` hints
+- [x] Remove counts from Organize title
+- [x] Underline + bold active tab
+- [x] Highlight focused control on Filters

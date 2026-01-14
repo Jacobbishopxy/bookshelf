@@ -1,0 +1,3 @@
+- [x] Remove `n` create from Labels
+- [x] Keep `n/r/d` CRUD in Catalog
+- [x] Tab switches Collections/Tags in Catalog

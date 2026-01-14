@@ -1,0 +1,5 @@
+- [x] Add mode to overlay state
+- [x] Bind `/` to Filters overlay
+- [x] Bind `l` to Organize overlay
+- [x] Hide Filters from Organize tabs
+- [x] Update footer/help hints
