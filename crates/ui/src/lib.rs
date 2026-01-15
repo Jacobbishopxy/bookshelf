@@ -2876,19 +2876,27 @@ impl Ui {
                 .collect()
         };
 
+        let focused_list_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
+
         let highlight_style = if focus {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            focused_list_style
         } else {
-            Style::default().fg(Color::Gray)
+            unfocused_list_style
         };
 
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled("Collections", title_style)),
             )
             .highlight_style(highlight_style)
@@ -2941,19 +2949,27 @@ impl Ui {
                 .collect()
         };
 
+        let focused_list_style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
+
         let highlight_style = if focus {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
+            focused_list_style
         } else {
-            Style::default().fg(Color::Gray)
+            unfocused_list_style
         };
 
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled(title, title_style)),
             )
             .highlight_style(highlight_style)
@@ -2970,22 +2986,12 @@ impl Ui {
         let sections = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3),
+                Constraint::Length(2),
                 Constraint::Min(0),
                 Constraint::Length(4),
             ])
             .split(area);
 
-        let tab_style = |active: bool| {
-            if active {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            }
-        };
         let filter_style = if self.label_manager_panel.filter_editing {
             Style::default()
                 .fg(Color::Yellow)
@@ -2994,27 +3000,17 @@ impl Ui {
             Style::default()
         };
 
-        let header_lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    "Collections",
-                    tab_style(self.label_manager_panel.tab == LabelManagerTab::Collections),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    "Tags",
-                    tab_style(self.label_manager_panel.tab == LabelManagerTab::Tags),
-                ),
-                Span::raw("  "),
-                Span::raw("(Tab to switch)"),
-            ]),
-            Line::from(vec![
-                Span::styled("Filter: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::styled(self.label_manager_panel.filter.clone(), filter_style),
-                Span::raw("  "),
-                Span::raw("(/ to edit, Ctrl+u clear)"),
-            ]),
-        ];
+        let filter_label = match self.label_manager_panel.tab {
+            LabelManagerTab::Collections => "Filter (Collections): ",
+            LabelManagerTab::Tags => "Filter (Tags): ",
+        };
+
+        let header_lines = vec![Line::from(vec![
+            Span::styled(filter_label, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(self.label_manager_panel.filter.clone(), filter_style),
+            Span::raw("  "),
+            Span::raw("(/ to edit, Ctrl+u clear)"),
+        ])];
         let header = Paragraph::new(Text::from(header_lines))
             .wrap(Wrap { trim: true })
             .alignment(Alignment::Left);
@@ -3046,14 +3042,14 @@ impl Ui {
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
-        let unfocused_list_style = Style::default().fg(Color::Gray);
+        let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
         // Collections
         let collections_focus = self.label_manager_panel.tab == LabelManagerTab::Collections;
         let collections_title_style = if collections_focus {
             Style::default()
                 .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -3069,6 +3065,11 @@ impl Ui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if collections_focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled("Collections", collections_title_style)),
             )
             .highlight_style(if collections_focus {
@@ -3089,7 +3090,7 @@ impl Ui {
         let tags_title_style = if tags_focus {
             Style::default()
                 .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -3105,6 +3106,11 @@ impl Ui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if tags_focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled("Tags", tags_title_style)),
             )
             .highlight_style(if tags_focus {
@@ -3245,12 +3251,14 @@ impl Ui {
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(sections[1]);
 
-        let highlight_style = Style::default()
+        let focused_list_style = Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
             .add_modifier(Modifier::BOLD);
+        let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
         // Collections
+        let collections_focus = self.assign_labels_panel.focus == AssignFocus::Collections;
         let collections = self.assign_visible_collections();
         let mut collection_cursor = self.assign_labels_panel.collection_cursor;
         let collection_max = collections.len() + 1;
@@ -3288,9 +3296,18 @@ impl Ui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if collections_focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled("Collection", collections_title_style)),
             )
-            .highlight_style(highlight_style)
+            .highlight_style(if collections_focus {
+                focused_list_style
+            } else {
+                unfocused_list_style
+            })
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
         let mut collection_state = ListState::default();
@@ -3300,6 +3317,7 @@ impl Ui {
         frame.render_stateful_widget(collections_list, body[0], &mut collection_state);
 
         // Tags
+        let tags_focus = self.assign_labels_panel.focus == AssignFocus::Tags;
         let tags = self.assign_visible_tags();
         let mut tag_cursor = self.assign_labels_panel.tag_cursor;
         if !tags.is_empty() {
@@ -3336,9 +3354,18 @@ impl Ui {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_style(if tags_focus {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        Style::default()
+                    })
                     .title(Span::styled("Tags", tags_title_style)),
             )
-            .highlight_style(highlight_style)
+            .highlight_style(if tags_focus {
+                focused_list_style
+            } else {
+                unfocused_list_style
+            })
             .highlight_symbol("> ")
             .highlight_spacing(HighlightSpacing::Always);
         let mut tag_state = ListState::default();
@@ -5541,7 +5568,7 @@ fn option_chip(label: &str, selected: bool, row_selected: bool) -> Span<'static>
             .bg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(Color::Gray)
     };
 
     Span::styled(label.to_string(), base)
