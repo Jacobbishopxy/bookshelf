@@ -46,6 +46,7 @@
 
 - For each specific task, create a markdown checklist in `plan/milestone/` named `xxxx-{task}.md` (e.g., `0007-add-import-flow.md`).
 - Start sub-tasks as unchecked checklist items (`- [ ] ...`); when a sub-task is finished, mark it checked (`- [x] ...`).
+- Milestones must follow the standard structure described in `plan/milestone/README.md` (title `# NNNN - ...`, `Goal:`, `Constraints:`, `## Work`, `## Test plan`).
 
 ## Commit & Pull Request Guidelines
 
