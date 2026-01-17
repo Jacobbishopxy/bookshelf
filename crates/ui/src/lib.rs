@@ -880,6 +880,10 @@ impl Ui {
                     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
                     let tmux = std::env::var("TMUX").unwrap_or_default();
                     let kitty_window_id = std::env::var("KITTY_WINDOW_ID").unwrap_or_default();
+                    let protocol_label = image_protocol::protocol_label(&self.image_picker);
+                    let image_supported = image_protocol::image_supported(&self.image_picker);
+                    let kitty_supported = image_protocol::kitty_supported(&self.image_picker);
+                    let capabilities = self.image_picker.capabilities();
                     let (font_w, font_h) = self.image_picker.font_size();
                     let timing_block = self.reader.last_image_timings.map(|t| {
                         let rasterize_ms = t
@@ -901,7 +905,7 @@ impl Ui {
                         )
                     });
                     let debug = format!(
-                        "env:\n  TERM={term}\n  TERM_PROGRAM={term_program}\n  TMUX={tmux}\n  KITTY_WINDOW_ID={kitty_window_id}\n\nratatui-image:\n  font_size_px={font_w}x{font_h}{}\n\n-----\n\n{}",
+                        "env:\n  TERM={term}\n  TERM_PROGRAM={term_program}\n  TMUX={tmux}\n  KITTY_WINDOW_ID={kitty_window_id}\n\nratatui-image:\n  protocol={protocol_label}\n  image_supported={image_supported}\n  kitty_supported={kitty_supported}\n  capabilities={capabilities:?}\n  font_size_px={font_w}x{font_h}{}\n\n-----\n\n{}",
                         timing_block.unwrap_or_default(),
                         self.engine.debug_page_text(&book, self.reader.page)?
                     );
@@ -934,18 +938,24 @@ impl Ui {
             KeyCode::Char('m') => {
                 match self.ctx.settings.reader_mode {
                     ReaderMode::Text => {
-                        if image_protocol::kitty_supported(&self.image_picker) {
+                        if image_protocol::image_supported(&self.image_picker) {
+                            image_protocol::prefer_kitty_if_supported(&mut self.image_picker);
                             self.ctx.settings.reader_mode = ReaderMode::Image;
                             self.reader.invalidate_render();
-                            self.reader.notice = Some("mode: image (kitty)".to_string());
+                            let label = image_protocol::protocol_label(&self.image_picker);
+                            let mut notice = format!("mode: image ({label})");
+                            if image_protocol::in_iterm_env() && label == "iterm2" {
+                                notice.push_str("; enable iTerm2 inline images (imgcat) if blank");
+                            }
+                            self.reader.notice = Some(notice);
                         } else {
                             self.ctx.settings.reader_mode = ReaderMode::Text;
                             let in_tmux = std::env::var_os("TMUX").is_some();
                             self.reader.notice = Some(if in_tmux {
-                                "image mode needs kitty + tmux allow-passthrough; press k to open kitty reader"
+                                "image mode needs a graphics protocol + tmux allow-passthrough; press k to open kitty reader"
                                     .to_string()
                             } else {
-                                "image mode requires kitty graphics; press k to open kitty reader"
+                                "image mode requires kitty/iterm2 graphics; press k to open kitty reader"
                                     .to_string()
                             });
                         }
@@ -1050,7 +1060,7 @@ impl Ui {
             }
             KeyCode::Char('k') => {
                 if self.ctx.settings.reader_mode == ReaderMode::Text
-                    && !image_protocol::kitty_supported(&self.image_picker)
+                    && !image_protocol::image_supported(&self.image_picker)
                 {
                     let spawned = if let Some(path) = self.reader.book_path.as_deref() {
                         kitty_spawn::spawn_kitty_reader_with_current_exe(path, self.reader.page)
@@ -3748,13 +3758,13 @@ impl Ui {
 
     fn draw_reader(&mut self, area: Rect, frame: &mut ratatui::Frame) {
         if self.ctx.settings.reader_mode == ReaderMode::Image
-            && !image_protocol::kitty_supported(&self.image_picker)
+            && !image_protocol::image_supported(&self.image_picker)
         {
             self.ctx.settings.reader_mode = ReaderMode::Text;
             self.reader.current_image = None;
             self.reader.render_key = None;
             self.reader.notice =
-                Some("kitty graphics protocol not detected; image mode disabled".to_string());
+                Some("image protocol not detected; image mode disabled".to_string());
         }
 
         let layout = Layout::default()
@@ -3771,6 +3781,10 @@ impl Ui {
             None => "Reader".to_string(),
         };
 
+        if self.ctx.settings.reader_mode == ReaderMode::Image {
+            image_protocol::prefer_kitty_if_supported(&mut self.image_picker);
+        }
+
         let page_title = {
             let page = self.reader.page.saturating_add(1);
             let page_part = if let Some(total) = self.reader.total_pages {
@@ -3784,8 +3798,11 @@ impl Ui {
                 ReaderMode::Image => {
                     let (fw, fh) = self.image_picker.font_size();
                     format!(
-                        "kitty {}% · {}x{}px",
-                        self.reader.image_zoom_percent, fw, fh
+                        "{} {}% · {}x{}px",
+                        image_protocol::protocol_label(&self.image_picker),
+                        self.reader.image_zoom_percent,
+                        fw,
+                        fh
                     )
                 }
             };
@@ -3801,10 +3818,6 @@ impl Ui {
         .wrap(Wrap { trim: true })
         .block(Block::default().borders(Borders::BOTTOM));
         frame.render_widget(header, layout[0]);
-
-        if self.ctx.settings.reader_mode == ReaderMode::Image {
-            image_protocol::prefer_kitty_if_supported(&mut self.image_picker);
-        }
 
         let inner_width = layout[1].width.saturating_sub(2);
         let inner_height = layout[1].height.saturating_sub(2);
@@ -3892,8 +3905,8 @@ impl Ui {
             Span::raw(" dump"),
         ];
 
-        let kitty_ok = image_protocol::kitty_supported(&self.image_picker);
-        if self.ctx.settings.reader_mode == ReaderMode::Image || kitty_ok {
+        let image_ok = image_protocol::image_supported(&self.image_picker);
+        if self.ctx.settings.reader_mode == ReaderMode::Image || image_ok {
             footer_spans.push(Span::raw("  "));
             footer_spans.push(Span::styled(
                 "m",
@@ -3902,7 +3915,7 @@ impl Ui {
             footer_spans.push(Span::raw(" mode"));
         }
 
-        if self.ctx.settings.reader_mode == ReaderMode::Text && !kitty_ok {
+        if self.ctx.settings.reader_mode == ReaderMode::Text && !image_ok {
             footer_spans.push(Span::raw("  "));
             footer_spans.push(Span::styled(
                 "k",
@@ -4975,11 +4988,12 @@ impl ReaderPanel {
                     self.image_pan_y_px = pan_y_px;
 
                     let kitty_ok = image_protocol::kitty_supported(picker);
+                    let image_ok = image_protocol::image_supported(picker);
                     let max_transmit_px = ctx.settings.kitty_image_quality.max_transmit_pixels();
                     let (transmit_image, transmit_px) = {
                         let px = u64::from(view_image.width())
                             .saturating_mul(u64::from(view_image.height()));
-                        if kitty_ok && px > max_transmit_px {
+                        if image_ok && px > max_transmit_px {
                             let scale = (max_transmit_px as f64 / px.max(1) as f64)
                                 .sqrt()
                                 .clamp(0.01, 1.0);
@@ -5092,8 +5106,8 @@ impl ReaderPanel {
                 ) {
                     Ok(text) => {
                         let text = if is_non_text_page(&text) {
-                            let kitty_ok = image_protocol::kitty_supported(picker);
-                            let hint = if kitty_ok {
+                            let image_ok = image_protocol::image_supported(picker);
+                            let hint = if image_ok {
                                 "image/chart (m: image mode)"
                             } else {
                                 "image/chart (k: kitty-reader)"

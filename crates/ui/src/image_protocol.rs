@@ -6,6 +6,18 @@ fn term_is_xterm_kitty() -> bool {
         .is_some_and(|term| term.trim().starts_with("xterm-kitty"))
 }
 
+pub(crate) fn in_iterm_env() -> bool {
+    std::env::var("ITERM_SESSION_ID")
+        .ok()
+        .is_some_and(|s| !s.trim().is_empty())
+        || std::env::var("TERM_PROGRAM")
+            .ok()
+            .is_some_and(|term| term.contains("iTerm"))
+        || std::env::var("LC_TERMINAL")
+            .ok()
+            .is_some_and(|term| term.contains("iTerm"))
+}
+
 pub(crate) fn ensure_tmux_allow_passthrough() {
     if std::env::var_os("TMUX").is_none() {
         return;
@@ -37,13 +49,17 @@ pub(crate) fn should_query_stdio() -> bool {
         return true;
     }
 
+    if in_iterm_env() {
+        return true;
+    }
+
     // In tmux, we need to query to detect the outer terminal protocol.
     std::env::var_os("TMUX").is_some()
 }
 
 pub(crate) fn stdio_query_timeout() -> std::time::Duration {
     // Strong hints we are talking to kitty (including over SSH).
-    if in_kitty_env() || term_is_xterm_kitty() {
+    if in_kitty_env() || term_is_xterm_kitty() || in_iterm_env() {
         return std::time::Duration::from_millis(1500);
     }
 
@@ -56,6 +72,9 @@ pub(crate) fn stdio_query_timeout() -> std::time::Duration {
 }
 
 pub(crate) fn kitty_supported(picker: &Picker) -> bool {
+    if in_iterm_env() {
+        return false;
+    }
     // `KITTY_WINDOW_ID` is reliable when present; otherwise rely on queried capabilities.
     if in_kitty_env() {
         return true;
@@ -68,11 +87,30 @@ pub(crate) fn kitty_supported(picker: &Picker) -> bool {
 }
 
 pub(crate) fn prefer_kitty_if_supported(picker: &mut Picker) -> bool {
+    if in_iterm_env() {
+        return false;
+    }
     if !kitty_supported(picker) {
         return false;
     }
     picker.set_protocol_type(ProtocolType::Kitty);
     true
+}
+
+pub(crate) fn image_supported(picker: &Picker) -> bool {
+    if kitty_supported(picker) {
+        return true;
+    }
+    !matches!(picker.protocol_type(), ProtocolType::Halfblocks)
+}
+
+pub(crate) fn protocol_label(picker: &Picker) -> &'static str {
+    match picker.protocol_type() {
+        ProtocolType::Halfblocks => "halfblocks",
+        ProtocolType::Sixel => "sixel",
+        ProtocolType::Kitty => "kitty",
+        ProtocolType::Iterm2 => "iterm2",
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +199,9 @@ mod tests {
                 ("KITTY_WINDOW_ID", None),
                 ("TERM", Some("xterm-kitty")),
                 ("TMUX", None),
+                ("ITERM_SESSION_ID", None),
+                ("TERM_PROGRAM", None),
+                ("LC_TERMINAL", None),
             ],
             || assert!(should_query_stdio()),
         );
@@ -173,6 +214,9 @@ mod tests {
                 ("KITTY_WINDOW_ID", None),
                 ("TERM", Some("xterm-256color")),
                 ("TMUX", None),
+                ("ITERM_SESSION_ID", None),
+                ("TERM_PROGRAM", None),
+                ("LC_TERMINAL", None),
             ],
             || assert!(!should_query_stdio()),
         );
@@ -185,6 +229,24 @@ mod tests {
                 ("KITTY_WINDOW_ID", None),
                 ("TERM", Some("xterm-256color")),
                 ("TMUX", Some("1")),
+                ("ITERM_SESSION_ID", None),
+                ("TERM_PROGRAM", None),
+                ("LC_TERMINAL", None),
+            ],
+            || assert!(should_query_stdio()),
+        );
+    }
+
+    #[test]
+    fn should_query_stdio_true_when_iterm_session_id_set() {
+        with_env_vars(
+            &[
+                ("KITTY_WINDOW_ID", None),
+                ("TERM", Some("xterm-256color")),
+                ("TMUX", None),
+                ("ITERM_SESSION_ID", Some("iterm-session")),
+                ("TERM_PROGRAM", None),
+                ("LC_TERMINAL", None),
             ],
             || assert!(should_query_stdio()),
         );
