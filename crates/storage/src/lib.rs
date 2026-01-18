@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Context as _;
 use bookshelf_core::{
     Book, BookLabels, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, ScanScope,
-    Settings, TagKind,
+    Settings, TagKind, Theme,
 };
 use rusqlite::{Connection, OptionalExtension as _};
 
@@ -37,6 +37,7 @@ impl Storage {
                 reader_text_mode TEXT NOT NULL DEFAULT 'reflow',
                 reader_trim_headers_footers INTEGER NOT NULL DEFAULT 1,
                 kitty_image_quality TEXT NOT NULL DEFAULT 'balanced',
+                theme TEXT NOT NULL DEFAULT 'dark',
                 scan_scope TEXT NOT NULL DEFAULT 'recursive',
                 library_roots_json TEXT NOT NULL DEFAULT '[]'
             );
@@ -111,6 +112,7 @@ impl Storage {
             [],
         )?;
 
+
         match self.conn.execute(
             "ALTER TABLE settings ADD COLUMN reader_mode TEXT NOT NULL DEFAULT 'text'",
             [],
@@ -164,6 +166,22 @@ impl Storage {
         }
 
         match self.conn.execute(
+            "ALTER TABLE settings ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'",
+            [],
+        ) {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(err).context("add settings.theme column");
+                }
+            }
+        }
+
+        self.conn
+            .execute("UPDATE settings SET theme = 'dark' WHERE theme IS NULL", [])?;
+
+        match self.conn.execute(
             "ALTER TABLE settings ADD COLUMN library_roots_json TEXT NOT NULL DEFAULT '[]'",
             [],
         ) {
@@ -196,20 +214,22 @@ impl Storage {
         let row = self
             .conn
             .query_row(
-                "SELECT reader_mode, reader_text_mode, reader_trim_headers_footers, kitty_image_quality, scan_scope, library_roots_json FROM settings WHERE id = 1",
+                "SELECT reader_mode, reader_text_mode, reader_trim_headers_footers, kitty_image_quality, theme, scan_scope, library_roots_json FROM settings WHERE id = 1",
                 [],
                 |row| {
                     let reader_mode: String = row.get(0)?;
                     let reader_text_mode: String = row.get(1)?;
                     let reader_trim_headers_footers: i64 = row.get(2)?;
                     let kitty_image_quality: String = row.get(3)?;
-                    let scan_scope: String = row.get(4)?;
-                    let library_roots_json: String = row.get(5)?;
+                    let theme: String = row.get(4)?;
+                    let scan_scope: String = row.get(5)?;
+                    let library_roots_json: String = row.get(6)?;
                     Ok((
                         reader_mode,
                         reader_text_mode,
                         reader_trim_headers_footers,
                         kitty_image_quality,
+                        theme,
                         scan_scope,
                         library_roots_json,
                     ))
@@ -222,6 +242,7 @@ impl Storage {
             reader_text_mode,
             reader_trim_headers_footers,
             kitty_image_quality,
+            theme,
             scan_scope,
             library_roots_json,
         ) = match row {
@@ -231,6 +252,7 @@ impl Storage {
                 "reflow".to_string(),
                 1,
                 "balanced".to_string(),
+                "dark".to_string(),
                 "recursive".to_string(),
                 "[]".to_string(),
             ),
@@ -245,6 +267,7 @@ impl Storage {
         let kitty_image_quality = kitty_image_quality
             .parse::<KittyImageQuality>()
             .unwrap_or(KittyImageQuality::Balanced);
+        let theme = theme.parse::<Theme>().unwrap_or(Theme::Dark);
         let reader_trim_headers_footers = reader_trim_headers_footers != 0;
         let scan_scope = scan_scope
             .parse::<ScanScope>()
@@ -257,6 +280,7 @@ impl Storage {
             reader_text_mode,
             reader_trim_headers_footers,
             kitty_image_quality,
+            theme,
             scan_scope,
             library_roots,
         };
@@ -270,12 +294,13 @@ impl Storage {
         let library_roots_json = serde_json::to_string(&settings.library_roots)?;
 
         self.conn.execute(
-            "UPDATE settings SET reader_mode = ?, reader_text_mode = ?, reader_trim_headers_footers = ?, kitty_image_quality = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
+            "UPDATE settings SET reader_mode = ?, reader_text_mode = ?, reader_trim_headers_footers = ?, kitty_image_quality = ?, theme = ?, scan_scope = ?, library_roots_json = ? WHERE id = 1",
             (
                 settings.reader_mode.as_str(),
                 settings.reader_text_mode.as_str(),
                 i64::from(settings.reader_trim_headers_footers),
                 settings.kitty_image_quality.as_str(),
+                settings.theme.as_str(),
                 settings.scan_scope.as_str(),
                 library_roots_json,
             ),

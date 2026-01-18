@@ -1,6 +1,6 @@
 //! Test helpers and fixtures.
 
-use bookshelf_core::{KittyImageQuality, ReaderMode, ReaderTextMode, ScanScope, Settings};
+use bookshelf_core::{KittyImageQuality, ReaderMode, ReaderTextMode, ScanScope, Settings, Theme};
 
 pub fn make_settings() -> Settings {
     Settings {
@@ -8,6 +8,7 @@ pub fn make_settings() -> Settings {
         reader_text_mode: ReaderTextMode::Reflow,
         reader_trim_headers_footers: true,
         kitty_image_quality: KittyImageQuality::Balanced,
+        theme: Theme::Dark,
         scan_scope: ScanScope::Recursive,
         library_roots: Vec::new(),
     }

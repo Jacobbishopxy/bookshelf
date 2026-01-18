@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use bookshelf_application::{AppContext, CollectionFilter, LabelCatalogOp, TagMatchMode};
 use bookshelf_core::{
     Book, BookLabels, Bookmark, KittyImageQuality, Note, ReaderMode, ReaderTextMode, Settings,
-    TagKind, TocItem,
+    TagKind, Theme, TocItem,
 };
 use bookshelf_engine::{Engine, PageFurniture};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -156,6 +156,13 @@ impl Ui {
         for mut child in self.spawned_kitties.drain(..) {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+
+    fn accent_color(&self) -> Color {
+        match self.ctx.settings.theme {
+            Theme::Light => Color::Blue,
+            Theme::Dark => Color::Yellow,
         }
     }
 
@@ -1467,11 +1474,17 @@ impl Ui {
                 if self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY {
                     self.ctx.settings.cycle_kitty_image_quality_prev();
                 }
+                if self.settings_panel.selected == SETTINGS_MENU_THEME {
+                    self.ctx.settings.cycle_theme();
+                }
                 Ok(None)
             }
             KeyCode::Right => {
                 if self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY {
                     self.ctx.settings.cycle_kitty_image_quality_next();
+                }
+                if self.settings_panel.selected == SETTINGS_MENU_THEME {
+                    self.ctx.settings.cycle_theme();
                 }
                 Ok(None)
             }
@@ -1486,6 +1499,9 @@ impl Ui {
                     }
                     SETTINGS_MENU_KITTY_IMAGE_QUALITY => {
                         self.ctx.settings.cycle_kitty_image_quality_next();
+                    }
+                    SETTINGS_MENU_THEME => {
+                        self.ctx.settings.cycle_theme();
                     }
                     _ => {}
                 }
@@ -2779,7 +2795,7 @@ impl Ui {
     fn search_panel_summary_lines(&self, focus: SearchFocus) -> Vec<Line<'static>> {
         let base_label_style = Style::default().add_modifier(Modifier::BOLD);
         let focus_style = Style::default()
-            .fg(Color::Yellow)
+            .fg(self.accent_color())
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
 
         let query_label_style = if focus == SearchFocus::Query {
@@ -2867,7 +2883,7 @@ impl Ui {
         let focus = self.search_panel.focus == SearchFocus::Collections;
         let title_style = if focus {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default()
@@ -2888,7 +2904,7 @@ impl Ui {
 
         let focused_list_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
         let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
@@ -2903,7 +2919,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -2935,7 +2951,7 @@ impl Ui {
         };
         let title_style = if focus {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else {
             Style::default()
@@ -2961,7 +2977,7 @@ impl Ui {
 
         let focused_list_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
         let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
@@ -2976,7 +2992,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -3004,7 +3020,7 @@ impl Ui {
 
         let filter_style = if self.label_manager_panel.filter_editing {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3050,7 +3066,7 @@ impl Ui {
 
         let focused_list_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
         let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
@@ -3058,7 +3074,7 @@ impl Ui {
         let collections_focus = self.label_manager_panel.tab == LabelManagerTab::Collections;
         let collections_title_style = if collections_focus {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3076,7 +3092,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if collections_focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -3099,7 +3115,7 @@ impl Ui {
         let tags_focus = self.label_manager_panel.tab == LabelManagerTab::Tags;
         let tags_title_style = if tags_focus {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3117,7 +3133,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if tags_focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -3203,7 +3219,7 @@ impl Ui {
         };
         let filter_style = if self.assign_labels_panel.query_editing {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3263,7 +3279,7 @@ impl Ui {
 
         let focused_list_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
         let unfocused_list_style = Style::default().fg(Color::White).bg(Color::Gray);
 
@@ -3296,7 +3312,7 @@ impl Ui {
         let collections_title_style = if self.assign_labels_panel.focus == AssignFocus::Collections
         {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3307,7 +3323,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if collections_focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -3354,7 +3370,7 @@ impl Ui {
 
         let tags_title_style = if self.assign_labels_panel.focus == AssignFocus::Tags {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(self.accent_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
@@ -3365,7 +3381,7 @@ impl Ui {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(if tags_focus {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.accent_color())
                     } else {
                         Style::default()
                     })
@@ -3520,7 +3536,7 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let list = List::new(items)
@@ -3617,7 +3633,7 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let list = List::new(items)
@@ -3729,7 +3745,7 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let list = List::new(items)
@@ -4052,11 +4068,12 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let kitty_quality_row_selected =
             self.settings_panel.selected == SETTINGS_MENU_KITTY_IMAGE_QUALITY;
+        let theme_row_selected = self.settings_panel.selected == SETTINGS_MENU_THEME;
         let items = vec![
             ListItem::new(Line::raw("Scan Paths")),
             ListItem::new(Line::from(vec![
@@ -4080,6 +4097,20 @@ impl Ui {
                     "sharp",
                     self.ctx.settings.kitty_image_quality == KittyImageQuality::Sharp,
                     kitty_quality_row_selected,
+                ),
+            ])),
+            ListItem::new(Line::from(vec![
+                Span::styled("Theme: ", Style::default().add_modifier(Modifier::BOLD)),
+                option_chip(
+                    "dark",
+                    self.ctx.settings.theme == Theme::Dark,
+                    theme_row_selected,
+                ),
+                Span::raw(" "),
+                option_chip(
+                    "light",
+                    self.ctx.settings.theme == Theme::Light,
+                    theme_row_selected,
                 ),
             ])),
         ];
@@ -4185,7 +4216,7 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let list = List::new(items)
@@ -4327,7 +4358,7 @@ impl Ui {
 
         let highlight_style = Style::default()
             .fg(Color::Black)
-            .bg(Color::Yellow)
+            .bg(self.accent_color())
             .add_modifier(Modifier::BOLD);
 
         let scope_row_selected = self.scan_panel.selected == 1;
@@ -4425,7 +4456,8 @@ struct SettingsPanel {
 
 const SETTINGS_MENU_SCAN_PATHS: usize = 0;
 const SETTINGS_MENU_KITTY_IMAGE_QUALITY: usize = 1;
-const SETTINGS_MENU_ITEM_COUNT: usize = 2;
+const SETTINGS_MENU_THEME: usize = 2;
+const SETTINGS_MENU_ITEM_COUNT: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SearchPanelMode {

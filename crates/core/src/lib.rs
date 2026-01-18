@@ -100,6 +100,7 @@ pub struct Settings {
     #[serde(default = "default_reader_trim_headers_footers")]
     pub reader_trim_headers_footers: bool,
     pub kitty_image_quality: KittyImageQuality,
+    pub theme: Theme,
     pub scan_scope: ScanScope,
     pub library_roots: Vec<String>,
 }
@@ -121,6 +122,13 @@ pub enum ReaderTextMode {
     Raw,
     Wrap,
     Reflow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Dark,
+    Light,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +161,15 @@ impl ReaderTextMode {
             ReaderTextMode::Raw => "raw",
             ReaderTextMode::Wrap => "wrap",
             ReaderTextMode::Reflow => "reflow",
+        }
+    }
+}
+
+impl Theme {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
         }
     }
 }
@@ -211,6 +228,12 @@ impl std::fmt::Display for ReaderTextMode {
     }
 }
 
+impl std::fmt::Display for Theme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl std::fmt::Display for KittyImageQuality {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -238,6 +261,18 @@ impl std::str::FromStr for ReaderTextMode {
             "wrap" => Ok(ReaderTextMode::Wrap),
             "reflow" => Ok(ReaderTextMode::Reflow),
             _ => Err("unknown reader text mode"),
+        }
+    }
+}
+
+impl std::str::FromStr for Theme {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dark" => Ok(Theme::Dark),
+            "light" => Ok(Theme::Light),
+            _ => Err("unknown theme"),
         }
     }
 }
@@ -289,6 +324,7 @@ impl Default for Settings {
             reader_text_mode: ReaderTextMode::Reflow,
             reader_trim_headers_footers: true,
             kitty_image_quality: KittyImageQuality::Balanced,
+            theme: Theme::Dark,
             scan_scope: ScanScope::Recursive,
             library_roots: Vec::new(),
         }
@@ -332,6 +368,13 @@ impl Settings {
 
     pub fn cycle_kitty_image_quality_prev(&mut self) {
         self.kitty_image_quality = self.kitty_image_quality.prev();
+    }
+
+    pub fn cycle_theme(&mut self) {
+        self.theme = match self.theme {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
+        };
     }
 
     pub fn cycle_scan_scope(&mut self) {
@@ -510,12 +553,20 @@ mod tests {
     }
 
     #[test]
+    fn theme_parses_strings() {
+        assert_eq!("dark".parse::<Theme>().unwrap(), Theme::Dark);
+        assert_eq!(" Light ".parse::<Theme>().unwrap(), Theme::Light);
+        assert!("nope".parse::<Theme>().is_err());
+    }
+
+    #[test]
     fn settings_normalizes_depth() {
         let mut settings = Settings {
             reader_mode: ReaderMode::Text,
             reader_text_mode: ReaderTextMode::Reflow,
             reader_trim_headers_footers: true,
             kitty_image_quality: KittyImageQuality::Balanced,
+            theme: Theme::Dark,
             scan_scope: ScanScope::Direct,
             library_roots: vec![
                 " ".to_string(),
